@@ -1,0 +1,854 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-10-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library("minfi")
+library("missMethyl") # Contain annot850K
+library(GenomicRanges)
+library(tidyverse)
+```
+
+# Load data
+
+```{r}
+load("../../results/03_EDA/outliers_detection/mtx_mvalues_winsor.RData")
+print(paste0("Dim win.mtx.m.values: ", paste(dim(win.m.values), collapse = ",")))
+
+load("../../results/01_pre_process/04_normalization/SetObjects/ENmixMSet_norm.RData")
+load("../../results/01_pre_process/04_normalization/SetObjects/wtR_BMIQ_betas_norm_ftr.RData")
+
+df.sva <- read.csv(
+  "../../results/02_PCA_ctrl_probes/ENmix_sva_all_donors.csv",
+  row.names = 1
+)
+
+full.pheno.data <- as.data.frame(ENmixMSet.norm@colData) %>%
+  merge(df.sva, by = "row.names") %>%
+  column_to_rownames(var = "Row.names")
+
+```
+# Combine limma results with CpG annotations
+
+```{r}
+DMPs.SEO <- read.csv("../../results/04_DM/new_final_only_specific_SEO_DMPs.csv") %>%
+  arrange(adj.P.Val)
+
+rownames(DMPs.SEO) <- DMPs.SEO$CpG.id
+head(DMPs.SEO)
+```
+
+# Check this for alternative DMR analysis
+https://support.bioconductor.org/p/94211/   
+
+Regulatory Feature Group	Description:
+- Promoter_Associated	CpG sites in promoter regions, regulating gene expression.
+- Promoter_Associated_Cell_type_specific	CpG sites in promoters active only in specific cell types.
+- Gene_Associated_Cell_type_specific	CpG sites in gene bodies or regulatory regions active in specific   cell types.
+- Unclassified_Cell_type_specific	CpG sites in cell-type-specific regulatory regions with unclear   function.
+- Unclassified	CpG sites in regulatory regions with unknown function.
+- "" (Empty String)	CpG sites not associated with any known regulatory feature.
+
+```{r}
+ann850k <- minfi::getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+ann850k <- ann850k[, c("chr", "pos", "strand", "Regulatory_Feature_Group", 
+                       "Relation_to_Island", "X450k_Enhancer")]
+ann850k$CpG.id <- rownames(ann850k)
+
+head(unique(ann850k$Regulatory_Feature_Group))
+```
+
+## Add annotations to DMPs
+
+```{r}
+DMPs.SEO <- DMPs.SEO %>% dplyr::select(-pos, -chr)
+cpgs <- rownames(ann850k)[rownames(ann850k) %in% DMPs.SEO$CpG.id]
+annot <- ann850k[cpgs, ]
+
+# Merge annotations with DMPs
+DMPs.SEO.annot <- merge(DMPs.SEO, annot, by = "CpG.id", all = TRUE) %>% 
+  as.data.frame()
+head(DMPs.SEO.annot)
+```
+
+# Plot to check annotated regions distributions
+
+```{r}
+df.clean <- DMPs.SEO.annot %>%
+  dplyr::select(CpG.id, Regulatory_Feature_Group, Relation_to_Island) %>%
+  dplyr::filter(Regulatory_Feature_Group != "" & !is.na(Regulatory_Feature_Group))
+
+# Count categories
+category_counts <- df.clean %>% dplyr::count(Regulatory_Feature_Group)
+
+# Create bar plot
+plot <- ggplot(category_counts, aes(x = Regulatory_Feature_Group, y = n, fill = Regulatory_Feature_Group)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Number of Categories in Regulatory Feature Group",
+    x = "Regulatory Feature Group",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_brewer(palette = "Set2")
+
+filename <- "../../results/05_EQTm/barplot_regulatory_feature_group.png"
+ggsave(
+  filename = filename,
+  plot = plot,
+  width = 8, 
+  height = 6,
+  units = "in"
+)
+```
+
+# Read GTF file with gene locations
+## Search genes for each CpG
+Strand in GTF:
+
+- Forward (+):
+Transcription proceeds from the 5' → 3' direction.
+The TSS (Transcription Start Site) is at the start coordinate of the gene.
+
+- Reverse(-):
+Transcription proceeds from the 3' → 5' direction (right to left on the chromosome).
+The TSS is at the end coordinate of the gene.
+
+Impact on TSS Distance:
+For forward strand (+) genes:
+Upstream = positions before the TSS (lower coordinates).
+Downstream = positions after the TSS (higher coordinates).
+
+For reverse strand (-) genes:
+Upstream = positions after the TSS (higher coordinates).
+Downstream = positions before the TSS (lower coordinates).
+
+```{r}
+gtf <- read.table('../../docs/genes.gtf', header = FALSE, skip = 5, sep = "\t")
+genes.info <- gtf[gtf$V3 == "gene", ]
+colnames(genes.info) <- c(
+  "seqname", "source", "feature", "start", "end", 
+  "score", "strand", "frame", "attribute"
+)
+
+df <- as_tibble(str_split_fixed(genes.info$attribute, ';', 7))
+ENS.ID <- as_tibble(str_split_fixed(df$V1, ' ', 2))$V2
+gene.symbol <- as_tibble(str_split_fixed(df$V4, ' ', 3))$V3
+
+genes.info$ENS.ID <- ENS.ID
+genes.info$gene.symbol <- gene.symbol
+genes.info$attribute <- NULL
+head(genes.info)
+```
+
+# Retrieve all the genes +- 1Mb from CpG position
+
+Some ideas reinforced:
+1. Rational Window Sizes for Gene Mapping
+Promoter-Focused (Immediate Regulatory Control):
+  - Use ±1,500–5,000 bp from the CpG site.
+  - This captures:
+    - Core promoters (where transcription machinery binds, typically within ±2,000 bp      of TSS).
+    - Proximal enhancers (often within 5 kb upstream of TSS).
+
+Why this works: >80% of promoter-associated CpGs fall within 1.5–2 kb of TSS, 
+and 95% within 5 kb. This minimizes noise while covering key regulatory regions.
+
+Gene Body + Proximal Regulatory (Balanced Approach):
+  - Use ±20,000 bp (20 kb). This includes:
+  - Promoters, first exons/introns (highly correlated with expression).
+  - Nearby enhancers or insulator elements (typically within 20 kb).
+  - Advantage: Captures >70% of functionally linked CpG-gene pairs while excluding
+    distant genes.
+
+2. Step-by-Step Strategy to Refine Mappings
+
+A. Prioritize Genomic Annotations
+Annotate CpGs using databases like:
+- Illumina's manifest files (e.g., IlluminaHumanMethylationEPICanno.ilm10b4.hg19).
+- UCSC/ENSEMBL for gene coordinates (TSS, TES, exons).
+
+Regulatory databases: ENCODE (promoters/enhancers), FANTOM5 (permissive enhancers), or Roadmap Epigenomics.
+
+Filter mappings to:
+- CpGs in promoters (TSS ± 2 kb).
+- CpGs in 5′ UTRs/first exons (strongly linked to expression).
+- CpGs in enhancers overlapping H3K27ac/H3K4me1 marks (use public ChIP-seq data).
+
+```{r}
+find.near.genes <- function(DMPS.annot) {
+  df.genes.close.to.cpgs <- data.frame()
+  
+  for (i in 1:nrow(DMPS.annot)) {
+    print(paste0("Searching genes for CpG: ", i) )
+    gene.selection <- genes.info %>%
+      dplyr::filter(
+        seqname == DMPS.annot[i, "chr"],
+        start %in% (
+          DMPS.annot[i, "pos"][[1]] - 1000000):(DMPS.annot[i, "pos"][[1]] + 1000000)
+      ) %>%
+      mutate(
+        distance.tss = DMPS.annot[i, "pos"][[1]] - start,
+        CpG.id = DMPS.annot[i, "CpG.id"], # Add CpG.id for tracking
+        CpG.relative.to.TSS = case_when(
+          strand == "+" & distance.tss > 0 ~ "downstream",
+          strand == "+" & distance.tss < 0 ~ "upstream",
+          strand == "-" & distance.tss > 0 ~ "upstream",
+          strand == "-" & distance.tss < 0 ~ "downstream",
+          TRUE ~ NA_character_ # Handle cases where distance.tss == 0 or strand is not +/-
+        ),
+        Relation_to_Island = DMPS.annot[i, "Relation_to_Island"],
+        Regulatory_Feature_Group = DMPS.annot[i, "Regulatory_Feature_Group"],
+        chr = DMPS.annot[i, "chr"],
+        pos = DMPS.annot[i, "pos"]
+        
+    )
+    # %>% filter(TSS.location == "upstream")
+    # Append the results to the dataframe
+    df.genes.close.to.cpgs <- bind_rows(
+      df.genes.close.to.cpgs,
+      gene.selection
+    )
+  }
+  
+  return(df.genes.close.to.cpgs)
+}
+
+df.genes.close.to.cpgs <- find.near.genes(DMPs.SEO.annot)
+df.genes.close.to.cpgs
+```
+
+```{r}
+top10.result.dir <- "../../results/05_EQTm/"
+top10.DMPs.SEO.annot <- DMPs.SEO.annot %>% 
+  dplyr::arrange(adj.P.Val) %>%
+  dplyr::slice(1:10) %>%
+  readr::write_csv(paste0(top10.result.dir,  "1Mb_top10_DMPs_SEO_annot.csv"))
+
+top10.DMPs.SEO.annot
+```
+
+## Load RNAseq data
+For the EQTm analysis, I will use the RNAseq data from the PRESTO study. Im using all the samples in this case. The idea here is to test wheater the DMPs regulate the expression of certain gene. For that I can use all the samples independly of the patient condition. Also, CpGs sites can regulate the expression of multiple genes, so I will use all the genes close to the CpG site.
+
+```{r}
+# load RNA-seq data
+rna.expression <- readr::read_tsv(
+  file.path("../../data/RNA_PRESTO_RV/", "20200427_103972-001_rawcounts.txt"),
+  col_types = readr::cols(),
+) %>%
+  tibble::column_to_rownames("Gene")
+dim(rna.expression)
+```
+
+# Filter out RNAseq samples not present in methylation data
+
+```{r}
+pheno.data <- full.pheno.data[
+  full.pheno.data$GenomeScan_ID_RNAseq %in% colnames(rna.expression),]
+print(pheno.data)
+
+rna.expression <- rna.expression[,pheno.data$GenomeScan_ID_RNAseq]
+print(dim(rna.expression))
+
+## Modify methylation matrices
+
+m.values = ENmix::B2M(BMIQ.betas.norm.ftr) # default a=100
+print(dim(m.values))
+m.values.t <- t(m.values)
+meth <- m.values.t[rownames(pheno.data),]
+print(dim(meth))
+
+betas.t <- t(BMIQ.betas.norm.ftr)
+betas <- betas.t[rownames(pheno.data),]
+print(dim(betas))
+```
+
+```{r}
+table(pheno.data$Group_simple)
+```
+
+
+# Run association between GEX and DMPs
+## I need to add a df that contain all significant cpgs-genes as df
+
+Diagnostic Plots
+- Mean-variance trend (voom plot).
+- Residuals vs fitted values (plotSA(fit)).
+- P-value distribution (hist(fit$p.value)).
+
+
+# Run association between GEX and DMPs
+## I need to add a df that contain all significant cpgs-genes as df
+
+Diagnostic Plots
+- Mean-variance trend (voom plot).
+- Residuals vs fitted values (plotSA(fit)).
+- P-value distribution (hist(fit$p.value)).
+
+check cg26587870 Significant genes: 71 / 96 
+
+```{r}
+#DMPS.annot <- top10.DMPs.SEO.annot
+DMPS.annot <- DMPs.SEO.annot
+
+library(tidyverse)
+library(patchwork)
+library(limma)
+library(edgeR)
+library(ggprism)
+library(ggpmisc)
+library(readr)
+
+# Set up output directory
+result.dir <- "../../results/05_EQTm/assoc_CpG_GEX"
+sig.dir <- file.path(result.dir, "1Mb_window_sig_CpG_GEX")
+script.result.dir <- file.path(sig.dir, "fdr_sig_cpg_sig_CpG_GEX")
+dir.create(script.result.dir, recursive = TRUE, showWarnings = FALSE)
+
+# Precompute gene annotations
+gene_annot <- df.genes.close.to.cpgs %>%
+  distinct(ENS.ID, gene.symbol, chr, pos, distance.tss, 
+           CpG.relative.to.TSS, Relation_to_Island, Regulatory_Feature_Group)
+
+# Initialize results storage
+df.sig.EQTm <- tibble(
+  CpG = character(),
+  GenesBeforeQC = integer(),
+  GenesAfterQC = integer(),
+  Sig.Genes = integer()
+)
+all_results <- list()
+
+# Convert phenotype column to factor
+pheno.data <- pheno.data %>%
+  mutate(COPD_Y_or_N = as.factor(COPD_Y_or_N))
+
+# ---- Helper Functions ----
+prepare_data <- function(cpg, pheno.data, meth, betas, rna.expression) {
+  # Combine phenotype with methylation data
+  current.pheno.data <- pheno.data %>%
+    as_tibble(rownames = "sample_id") %>%
+    mutate(
+      Methylation = meth[sample_id, cpg],
+      Betas = betas[sample_id, cpg]
+    ) %>%
+    filter(!is.na(Methylation) & !is.na(Betas)) %>%
+    arrange(match(GenomeScan_ID_RNAseq, colnames(rna.expression)))
+  
+  # Get nearby genes
+  ENS.ID.to.use <- df.genes.close.to.cpgs %>%
+    filter(CpG.id == cpg) %>%
+    pull(ENS.ID) %>%
+    unique()
+  
+  list(
+    pheno = current.pheno.data,
+    genes = ENS.ID.to.use
+  )
+}
+
+run_eQTM_analysis <- function(rna_expression, pheno.data, cpg) {
+  # Align samples
+  common_samples <- intersect(colnames(rna_expression), 
+                            pheno.data$GenomeScan_ID_RNAseq)
+  
+  if (length(common_samples) < 3) {
+    message("Skipping: Insufficient samples (", length(common_samples), ")")
+    return(NULL)
+  }
+  
+  # Subset data to common samples
+  rna_expression <- rna_expression[, common_samples, drop = FALSE]
+  pheno.data <- pheno.data %>%
+    dplyr::filter(GenomeScan_ID_RNAseq %in% common_samples) %>%
+    arrange(match(GenomeScan_ID_RNAseq, common_samples)) %>%
+    as.data.frame()
+  
+  # Filter low-expressed genes
+  keep_genes <- rowSums(rna_expression > 0) >= 0.2 * ncol(rna_expression)
+  rna_expression <- rna_expression[keep_genes, , drop = FALSE]
+  
+  if (nrow(rna_expression) == 0) return(NULL)
+  
+  # Create design matrix
+  design <- model.matrix(
+    ~ Betas + Gender + Age + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7,
+    data = pheno.data
+  )
+  
+  # Check for rank deficiency
+  if (qr(design)$rank < ncol(design)) {
+    message("Rank-deficient design matrix")
+    return(NULL)
+  }
+  
+  # EdgeR processing
+  DGEL <- DGEList(rna_expression)
+  
+  # Remove samples with zero library size
+  keep_samples <- colSums(DGEL$counts) > 0
+  if (any(!keep_samples)) {
+    message("Removing ", sum(!keep_samples), " samples with zero library size")
+    DGEL <- DGEL[, keep_samples]
+    design <- design[keep_samples, ]
+  }
+  
+  # Skip if insufficient samples remain
+  if (ncol(DGEL) < 3) {
+    message("Insufficient samples after filtering (", ncol(DGEL), ")")
+    return(NULL)
+  }
+  
+  # Calculate normalization factors
+  DGEL <- calcNormFactors(DGEL, method = "TMM")
+  
+  # Handle single gene case differently
+  if (nrow(DGEL) == 1) {
+    message("Single gene case - using logCPM instead of voom")
+    logCPM <- cpm(DGEL, log = TRUE, prior.count = 3)
+    
+    # Use standard least squares for single gene
+    fit <- lmFit(logCPM, design, method = "ls") %>%
+      eBayes(robust = FALSE)
+    
+    # Create pseudo-voom object for plotting
+    voom_data <- list(
+      E = logCPM,
+      weights = matrix(1, nrow = 1, ncol = ncol(logCPM)),
+      design = design
+    )
+  } else {
+    # Multiple genes - use voom with robust regression
+    voom_data <- voom(DGEL, design, plot = FALSE)
+    
+    # Increase maxit for robust regression to prevent convergence warnings
+    fit <- lmFit(voom_data, design, method = "robust", maxit = 1000) %>%
+      eBayes(proportion = 0.1, robust = TRUE)
+  }
+  
+  # Extract results
+  results <- topTable(fit, coef = "Betas", number = Inf, sort.by = "none") %>%
+    rownames_to_column("geneID") %>%
+    left_join(gene_annot, by = c("geneID" = "ENS.ID")) %>%
+    mutate(CpG.id = cpg)
+  
+  # Return both results and expression data
+  list(
+    results = results,
+    expr_data = voom_data
+  )
+}
+
+generate_plot <- function(gene, cpg, analysis_result, pheno.data) {
+  # Extract expression data from analysis result
+  expr_data <- analysis_result$expr_data
+  gene_symbol <- gene_annot$gene.symbol[gene_annot$ENS.ID == gene]
+  
+  # Create expression data frame
+  expr_df <- data.frame(
+    GenomeScan_ID_RNAseq = colnames(expr_data$E),
+    RNA.expr = as.numeric(expr_data$E[gene, ])
+  )
+  
+  plot_data <- pheno.data %>%
+    left_join(expr_df, by = "GenomeScan_ID_RNAseq") %>%
+    mutate(Methylation = Betas) %>%
+    filter(!is.na(RNA.expr) & !is.na(Methylation))
+  
+  if (nrow(plot_data) < 3) return(NULL)
+  
+  # Scatter plot
+  scatter_plot <- ggplot(plot_data, aes(x = Methylation, y = RNA.expr)) +
+    geom_point(aes(color = COPD_Y_or_N), size = 3, alpha = 0.8) +
+    geom_smooth(method = "lm", se = TRUE, color = "darkblue") +
+    stat_poly_eq(
+      aes(label = paste(..eq.label.., ..adj.rr.label.., sep = "~~~")),
+      formula = y ~ x, parse = TRUE, size = 5
+    ) +
+    labs(
+      x = "Methylation (Beta Value)",
+      y = "log2 Expression",
+      title = paste(gene_symbol, "Expression vs", cpg),
+      color = "COPD Status"
+    ) +
+    theme_prism(base_size = 14) +
+    theme(legend.position = "top")
+  
+  # Boxplot
+  box_plot <- ggplot(plot_data, aes(x = COPD_Y_or_N, y = Methylation)) +
+    geom_boxplot(aes(fill = COPD_Y_or_N), alpha = 0.7) +
+    geom_point(position = position_jitter(width = 0.2), size = 1.5) +
+    labs(x = "COPD Status", y = "Methylation (Beta Value)") +
+    theme_prism(base_size = 14) +
+    theme(legend.position = "none")
+  
+  # Combine plots
+  scatter_plot / box_plot + 
+    plot_layout(heights = c(3, 1)) +
+    plot_annotation(title = paste("eQTM:", gene_symbol, "and", cpg),
+                    theme = theme_prism(base_size = 16))
+}
+
+# --------------------------- Main Loop ---------------------------------------#
+
+for (i in seq_len(nrow(DMPS.annot))) {
+  cpg <- DMPS.annot$CpG.id[i]
+  cat("\nProcessing CpG:", cpg, paste0("[", i, "/", nrow(DMPS.annot), "]"), "\n")
+  
+  tryCatch({
+    # Step 1: Prepare data
+    data_prep <- prepare_data(cpg, pheno.data, meth, betas, rna.expression)
+    current.pheno.data <- data_prep$pheno
+    ENS.ID.to.use <- data_prep$genes
+    
+    # Skip if no genes nearby
+    if (length(ENS.ID.to.use) == 0) {
+      cat("No genes near CpG. Skipping.\n")
+      next
+    }
+    
+    # Step 2: Subset RNA expression
+    rna_expression_current <- rna.expression[ENS.ID.to.use, , drop = FALSE]
+    
+    # Step 3: Run analysis
+    analysis_result <- run_eQTM_analysis(rna_expression_current, current.pheno.data, cpg)
+    
+    if (is.null(analysis_result)) {
+      cat("Analysis failed. Skipping.\n")
+      next
+    }
+    
+    # Extract results
+    results <- analysis_result$results
+    sig_results <- results %>% 
+      filter(adj.P.Val < 0.05) %>% ##### P.Value or adj.P.Val !!!!!!!!!!!!!
+      arrange( P.Value)
+    
+    # Update summary statistics
+    df.sig.EQTm <- df.sig.EQTm %>%
+      add_row(
+        CpG = cpg,
+        GenesBeforeQC = length(ENS.ID.to.use),
+        GenesAfterQC = nrow(results),
+        Sig.Genes = nrow(sig_results)
+      )
+    
+    cat("Significant genes:", nrow(sig_results), 
+        "/", nrow(results), "\n")
+    
+    # Step 5: Save and plot significant results
+    if (nrow(sig_results) > 0) {
+      # Create output directory
+      cpg_dir <- file.path(script.result.dir, cpg)
+      dir.create(cpg_dir, showWarnings = FALSE, recursive = TRUE)
+      
+      # Save results
+      write_csv(results, file.path(cpg_dir, paste0(cpg, "_full_results.csv")))
+      write_csv(sig_results, file.path(cpg_dir, paste0(cpg, "_significant_results.csv")))
+      
+      # Generate and save plots
+      for (gene in sig_results$geneID) {
+        plot <- generate_plot(gene, cpg, analysis_result, current.pheno.data)
+        if (!is.null(plot)) {
+          ggsave(
+            filename = file.path(
+              cpg_dir,
+              paste0(cpg, "_", gene_annot$gene.symbol[gene_annot$ENS.ID == gene], "_plot.png")
+            ),
+            plot = plot,
+            width = 10,
+            height = 12,
+            dpi = 300
+          )
+        }
+      }
+      
+      # Store results
+      all_results[[cpg]] <- sig_results
+    }
+  }, error = function(e) {
+    message("\nERROR processing ", cpg, ": ", conditionMessage(e), "\n")
+  })
+}
+
+# ---- Final Output ----
+# Combine all results
+final_results <- bind_rows(all_results)
+
+# Save summary statistics
+write_csv(df.sig.EQTm, file.path(script.result.dir, "eQTM_summary_statistics_fdr_pval.csv"))
+write_csv(final_results, file.path(script.result.dir, "significant_CpG_GEX.csv"))
+
+
+# Load ggplot2
+library(ggplot2)
+
+# Create barplot
+plot <- ggplot(final_results, aes(x = Relation_to_Island)) +
+  geom_bar(fill = "orange") +
+  labs(title = "Distribution of Relation to CpG Island",
+       x = "Relation to Island",
+       y = "Count") +
+  theme_minimal()
+
+
+filename <- file.path(script.result.dir, "barplot_relation_to_island.png")
+ggplot2::ggsave(
+  filename = filename,
+  plot = plot,
+  width = 8, 
+  height = 6,
+  units = "in"
+)
+
+
+# Print session info for reproducibility
+sessionInfo()
+```
+
+
+```{r}
+# save significant genesvsCpG associations
+res.dir <- "../../results/05_EQTm/assoc_CpG_GEX/1Mb_window_sig_CpG_GEX/fdr_sig_cpg_sig_CpG_GEX/"
+
+df.sig.EQTm <- readr::read_csv(
+  file.path(
+    res.dir,
+    "significant_CpG_GEX.csv")
+  )%>%
+  dplyr::arrange(P.Value)
+
+df.sig.EQTm
+```
+
+# Remove distance to TSS for now
+
+```{r}
+dd <- df.sig.EQTm %>%
+  dplyr::select(CpG.id, gene.symbol, logFC, P.Value, adj.P.Val, AveExpr, geneID) %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(
+    logFC     = round(logFC, 3),
+    AveExpr   = round(AveExpr, 3)
+  ) %>%
+  readr::write_csv(file.path(script.result.dir, "distinct_significant_CpG_GEX.csv"))
+
+dd 
+```
+
+
+```{r}
+# save significant genesvsCpG associations
+res.dir <- "../../results/07_DGE/Final_results/tables/"
+
+df.sig.GEX.EQTm <- readr::read_csv(
+  file.path(
+    res.dir,
+    "cpg_and_genes_seo_specific_in_eqtm.csv")
+  )%>%
+  dplyr::arrange(P.Value)
+
+df.sig.GEX.EQTm %>%
+  dplyr::select(CpG.id, gene.symbol, logFC, P.Value, adj.P.Val, AveExpr, geneID) %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(
+    logFC     = round(logFC, 3),
+    AveExpr   = round(AveExpr, 3)
+  ) %>%
+  readr::write_csv(
+    file.path(
+      script.result.dir,
+      "genes_seo_specific_in_eqtm_distinct_significant.csv")
+    )
+
+
+```
+
+# Make the plots Im including in the paper HQ
+
+```{r}
+final_results <- bind_rows(all_results)
+
+cpg <- "cg26036029" # AGER
+#cpg <- "cg21733531" # ZNF727
+#analysis_result <- final_results
+
+data_prep <- prepare_data(cpg, pheno.data, meth, betas, rna.expression)
+current.pheno.data <- data_prep$pheno
+ENS.ID.to.use <- data_prep$genes
+    
+
+# Step 2: Subset RNA expression
+rna_expression_current <- rna.expression[ENS.ID.to.use, , drop = FALSE]
+    
+# Step 3: Run analysis
+analysis_result <- run_eQTM_analysis(rna_expression_current, current.pheno.data, cpg)
+
+    
+# Extract results
+results <- analysis_result$results
+
+sig_results <- results %>% 
+  filter(adj.P.Val < 0.05) %>% ##### P.Value or adj.P.Val !!!!!!!!!!!!!
+  arrange( P.Value)
+    
+# Update summary statistics
+df.sig.EQTm <- df.sig.EQTm %>%
+      add_row(
+        CpG = cpg,
+        GenesBeforeQC = length(ENS.ID.to.use),
+        GenesAfterQC = nrow(results),
+        Sig.Genes = nrow(sig_results)
+)
+```
+
+
+
+```{r}
+generate_plot <- function(gene, cpg, analysis_result, pheno.data) {
+  # Extract expression data from analysis result
+  expr_data <- analysis_result$expr_data
+  gene_symbol <- gene_annot$gene.symbol[gene_annot$ENS.ID == gene]
+  
+  # Create expression data frame
+  expr_df <- data.frame(
+    GenomeScan_ID_RNAseq = colnames(expr_data$E),
+    RNA.expr = as.numeric(expr_data$E[gene, ])
+  )
+  
+  plot_data <- pheno.data %>%
+    left_join(expr_df, by = "GenomeScan_ID_RNAseq") %>%
+    mutate(Methylation = Betas) %>%
+    filter(!is.na(RNA.expr) & !is.na(Methylation))
+  
+  if (nrow(plot_data) < 3) return(NULL)
+  
+  # Convert COPD_Y_or_N to meaningful labels
+  plot_data <- plot_data %>%
+    mutate(Condition = ifelse(COPD_Y_or_N == "COPD", "COPD", "Control"),
+           Condition = factor(Condition, levels = c("COPD", "Control")))
+  
+  # Define colors for conditions
+  condition_colors <- c("COPD" = "#E41A1C", "Control" = "#377EB8")
+  
+  # Scatter plot with enhanced styling
+  scatter_plot <- ggplot(plot_data, aes(x = Methylation, y = RNA.expr)) +
+    geom_point(aes(fill = Condition), 
+               size = 4, 
+               alpha = 0.9,
+               shape = 21,           # Circle with fill and border
+               color = "black",      # Border color
+               stroke = 1.2) +       # Border thickness
+    geom_smooth(method = "lm", se = TRUE, color = "darkblue", linewidth = 1.2) +
+    stat_poly_eq(
+      aes(label = paste(..eq.label.., ..adj.rr.label.., sep = "~~~")),
+      formula = y ~ x, 
+      parse = TRUE, 
+      size = 5,
+      vjust = 0.01,        # Move equation upward (positive values move up)
+      hjust = -0.9  
+    ) +
+    scale_fill_manual(values = condition_colors) +
+    labs(
+      x = "Methylation (Beta Value)",
+      y = "logCPM(Expression)",
+      title = paste(gene_symbol, "Expression vs", cpg),
+      fill = "Condition"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 25),
+      axis.line.x = element_line(color = "black", linewidth = 0.8),
+      axis.line.y = element_line(color = "black", linewidth = 0.8),
+      axis.title.x = element_text(size = 22, face = "bold"),
+      axis.title.y = element_text(size = 22, face = "bold"),
+      axis.text.x = element_text(size = 18),
+      axis.text.y = element_text(size = 18),
+      legend.title = element_text(size = 22, face = "bold"),
+      legend.text = element_text(size = 16),
+      legend.position = "top",
+      panel.grid = element_blank()
+    )
+  
+  # Boxplot with enhanced styling
+  box_plot <- ggplot(plot_data, aes(x = Condition, y = Methylation)) +
+    geom_boxplot(aes(fill = Condition), 
+                 alpha = 0.9,
+                 outlier.shape = NA,
+                 position = position_dodge(width = 0.8),
+                 width = 0.6) +
+    geom_quasirandom(
+      aes(fill = Condition),
+      dodge.width = 0.8,
+      alpha = 0.9,
+      size = 3,
+      shape = 21,
+      color = "black",
+      stroke = 1.2
+    ) +
+    scale_fill_manual(values = condition_colors) +
+    labs(x = "Condition", y = "Methylation (Beta Value)") +
+    theme_minimal() +
+    theme(
+      axis.line.x = element_line(color = "black", linewidth = 0.8),
+      axis.line.y = element_line(color = "black", linewidth = 0.8),
+      axis.title.x = element_text(size = 16, face = "bold"),
+      axis.title.y = element_text(size = 16, face = "bold"),
+      axis.text.x = element_text(size = 14),
+      axis.text.y = element_text(size = 14),
+      legend.position = "none",
+      panel.grid = element_blank()
+    )
+  
+  # Combine plots
+  combined_plot <- scatter_plot / box_plot + 
+    plot_layout(heights = c(3, 1)) +
+    plot_annotation(
+      title = paste("eQTM:", gene_symbol, "and", cpg),
+      theme = theme_minimal()
+    )
+  
+  return(combined_plot)
+}
+
+# Example usage with saving:
+# plot <- generate_plot(gene, cpg, analysis_result, pheno.data)
+# 
+# ggsave(
+#   filename = "eQTM_plot.svg",
+#   plot = plot,
+#   device = "svg",
+#   width = 8,
+#   height = 10,
+#   dpi = 300
+# )
+```
+
+
+```{r}
+library("ggbeeswarm")
+gene <- "ENSG00000204305" # AGER
+#gene <- "ENSG00000214652" # ZNF727
+# Generate and save plots
+plot <- generate_plot(gene, cpg, analysis_result, current.pheno.data)
+file.path <- "../../results/05_EQTm/assoc_CpG_GEX/1Mb_window_sig_CpG_GEX/fdr_sig_cpg_sig_CpG_GEX/AGER_eQTM_plot.svg"
+
+ggsave(
+   filename = file.path,
+   plot = plot,
+   device = "svg",
+   width = 8,
+   height = 10,
+   dpi = 300
+ )
+```
+
+

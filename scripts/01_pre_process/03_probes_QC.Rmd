@@ -1,0 +1,414 @@
+---
+title: "03_probes_QC"
+author: "Martin"
+date: "2024-03-13"
+output: html_document
+---
+## Introduction
+During the previous step I filtered out 5 bad quality samples(4 were H2O control samples), now I want to remove the bad quality probes. This is important because can cause artifacts in the data and problems in the downstream analysis. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, dev = "CairoPNG")
+```
+
+### Load packages
+
+```{r warning=FALSE, message=FALSE}
+library(minfi)
+library(tidyverse)
+```
+
+### Qc metrics for probes quality check
+- Detection pvalues probe-wise, remove probes with detection p-values > 0.05 i.e > 25% of total samples.
+- Remove cross reactive probes, these cr probes are identified in literature.
+- Remove probes containing SNPs within 3 nucleotides of the CpG site and MAF > 10%.
+- Exclude probes from X and Y chromosomes? To avoid spurious methylation differences. Check this paper: https://epigeneticsandchromatin.biomedcentral.com/articles/10.1186/s13072-022-00477-0
+- Remove High intensity probes
+- Remove probes with more than 5% of the samples having low bead numbers (<3).
+
+### Load sample filtered objects
+```{r}
+load("../../results/01_pre_process/02_sample_QC/SetObjects/sf_rgSet_ext.RData")
+load("../../results/01_pre_process/02_sample_QC/SetObjects/sf_MSet.RData")
+load("../../results/01_pre_process/02_sample_QC/SetObjects/sf_grSet.RData")
+```
+
+# Keep CpGs starting with cg
+
+```{r}
+dim(sf.MSet)
+cg.sf.MSet <- sf.MSet[grepl("^cg", rownames(sf.MSet)), ]
+dim(cg.sf.MSet)
+
+failed.probes1 <- minfi::featureNames(sf.MSet)[
+  !minfi::featureNames(sf.MSet) %in% minfi::featureNames(cg.sf.MSet)]
+
+length(failed.probes1)
+```
+
+### Probe-wise detection p-value
+The same as for samples, we want to remove probes showing detection p-values (e.g >0.05). For example the scanner can failed to read signals from some probes due to low intensities or artifacts in the array.
+
+The way that computational methods deal with this is by comparing the signal of a certain probe to the average signal from the negative controls.
+```{r}
+# ensure probes are in the same order in the mSetSq and detP objects
+detP <- detectionP(sf.rgSet_ext)
+detP <- detP[match(featureNames(sf.MSet), rownames(detP)),]
+
+# remove any probes that have failed in one or more samples; this next line
+# checks for each row of detP whether the number of values < 0.01 is equal
+# to the number of samples (TRUE) or not (FALSE)
+keep <- rowSums(detP < 0.01) == ncol(sf.MSet)
+table(keep)
+
+sf.MSet.detP <- sf.MSet[keep,]
+
+failed.probes2 <- minfi::featureNames(sf.MSet)[
+  !minfi::featureNames(sf.MSet) %in% minfi::featureNames(sf.MSet.detP)]
+
+length(failed.probes2)
+```
+### Remove cross-reactive probes
+I used the following package https://github.com/markgene/maxprobes for EPIC/850k cross-reactive probes correction.
+
+**Note: ** "6% of the array probes can potentially generate spurious signals because of co-hybridization to alternate genomic sequences highly homologous to the intended targets." as written in the paper below:
+https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-1066-1
+
+
+```{r warning=FALSE, message=FALSE}
+library(maxprobes)
+cr_EPIC = maxprobes::xreactive_probes(array_type = "EPIC")
+cr_EPIC_pedsley = read_csv(
+  "../../docs/probes/Technical_probes_TS1-13059_2016_1066_MOESM1_ESM.csv"
+  )
+
+print(dim(sf.MSet))
+MsetEx_noXloci <- maxprobes::dropXreactiveLoci(sf.MSet)
+
+diff = length(sf.MSet@NAMES) - length(MsetEx_noXloci@NAMES)
+
+print(paste0("Number of cr probes in function: " , length(cr_EPIC)))
+print(paste0("Number of cr probes from Pedsley et al: ",dim(cr_EPIC_pedsley)[1]))
+print(paste0("CpGs in sample filtered MSet: ", length(sf.MSet@NAMES)))
+print(paste0("CpGs in samples and cr probes filtered in MSet: ", length(MsetEx_noXloci@NAMES)))
+print(paste0("Number of cr probes removed: " , diff))
+
+```
+
+```{r}
+MsetEx_noXloci
+```
+
+### Cross-reactive probes to remove
+The sf.MSet have a total number of probes equal to 866238, after dropping reactive probes, I get MsetEx_noXloci = 823015 probes. 
+In total were removed 43223 reactive probes. Which is expected for EPIC/850k array.
+
+```{r}
+# Find cross reactive probes
+failed.probes3 <- minfi::featureNames(sf.MSet)[
+  !minfi::featureNames(sf.MSet) %in% minfi::featureNames(MsetEx_noXloci)
+]
+
+length(failed.probes3)
+```
+
+### Remove probes containing SNPs
+I want to remove those snps within 3 nucleotides of the CpG site and MAF > 1%.
+Look at this post for better understanding.
+
+https://support.bioconductor.org/p/9155604/#9155624
+
+```{r}
+dim(sf.grSet)
+all.probes <- rownames(sf.grSet)
+
+sf.grSet.nosnp <- dropLociWithSnps(
+                        sf.grSet,
+                        snps = c("CpG", "SBE"),
+                        maf = 0 # remove any snp 
+                        )
+
+nosnp.probes <- rownames(sf.grSet.nosnp)
+
+failed.probes4 <- all.probes[!(all.probes %in% nosnp.probes)]
+length(failed.probes4)
+```
+
+### Exclude probes from X and Y chromosomes
+#### Remove directly all probes in chrX and chrY. 
+
+```{r}
+ann850k <- minfi::getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+
+xy.probes <- rownames(ann850k)[which(ann850k$chr=="chrX" | ann850k$chr=="chrY")]
+sf.MSet.filt.xy <- sf.MSet[rownames(sf.MSet) %in% xy.probes, ]
+
+failed.probes5 <- rownames(sf.MSet.filt.xy)
+length(failed.probes5)
+```
+### High intensity probes
+From this paper: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4239800/
+
+"For example, we have looked at the relation between signal intensities and DNA methylation measurements [b-values, defined as the ratio of the methylated signal over the total signal (methylated + unmethylated) and have observed that probes displaying a high average intensity (i.e. a high average of the methylated and unmethylated signals) are more prone than probes displaying a lower average intensity to provide DNA methylation measurements inconsistent with measurements obtained with other approaches, such as BPS (bisulfite pyrosequencing).
+
+They have a tendency to provide values close to 0.5, independently of their true methylation state. Of note, type II Infinium probes seem to be less prone to this phenomenon."
+
+```{r}
+# Retrieve probe design info
+manifest <- getManifest(sf.rgSet_ext)
+snpProbesI <- getProbeInfo(manifest, type = "I")$Name
+
+Meth <- getMeth(sf.MSet)
+Unmeth <- getUnmeth(sf.MSet)
+# Median
+Methmed <- apply(Meth, 1, median)
+Unmethmed <- apply(Unmeth, 1, median)
+
+
+MUmed <- sqrt(Methmed*Unmethmed)
+
+hist(MUmed)
+
+# Tatiana
+hi.MU <- names(which(MUmed > 10000)) # cutoff at MU = 10,000
+failed.probes6 <- hi.MU[hi.MU %in% snpProbesI]
+length(failed.probes6)
+```
+
+
+### Get probes  more than 5% of samples have bead numer below 3
+**Note: the Watermelon beadcount() function work with rgSet extended object.**
+
+```{r message=FALSE, warning=FALSE}
+library("wateRmelon")
+
+# Run bead count
+df.bead.counts <- wateRmelon::beadcount(sf.rgSet_ext)
+
+# Function to calculate percentage of NAs in each row (probes)
+pct.of.nas <- function(row) {
+  sum(is.na(row)) / length(row) * 100
+}
+
+df.bead.counts$na_pct <- apply(df.bead.counts, 1, pct.of.nas)
+
+# Filter out probes > 5% NAs
+failed.probes7 <- df.bead.counts %>% 
+                        dplyr::filter(na_pct > 5) %>%
+                        rownames()
+length(failed.probes7)
+```
+
+
+### Remove all bad quality probes
+] 106162
+[1] "We need to discard 7119 42944 29958 19627 8675 and 6596 probes as it was pointed during the analysis."
+[1] "In total we discard 106162 probes"
+
+```{r}
+out.dir <- file.path("../../results/01_pre_process/03_probes_QC/failed_probes/")
+
+# write failed probes-files
+failed.probes <- unique(
+  c(failed.probes1,
+    failed.probes2,
+    failed.probes3,
+    failed.probes4,
+    failed.probes5,
+    failed.probes6,
+    failed.probes7
+    )
+  )
+print(length(failed.probes))
+
+write(
+  failed.probes1,
+  file = file.path(out.dir, "failed_probes1_keep_start_with_cg.txt")
+)
+write(
+  failed.probes2,
+  file = file.path(out.dir, "failed_probes2_low_detection_pvalues.txt")
+)
+write(
+  failed.probes3,
+  file = file.path(out.dir, "failed_probes3_crossreactive.txt")
+)
+write(
+  failed.probes4,
+  file = file.path(out.dir, "failed_probes4_snpsites_at_interrogation.txt")
+)
+write(
+  failed.probes5,
+  file = file.path(out.dir, "failed_probes5_xy_problematic_probes.txt")
+)
+write(
+  failed.probes6,
+  file = file.path(out.dir, "failed_probes6_high_intensity_signals.txt")
+)
+
+write(
+  failed.probes7,
+  file = file.path(out.dir, "failed_probes7_low_bead_counts.txt")
+)
+
+
+# All probes to remove
+write(failed.probes, file = file.path(out.dir, "failed_probes.txt"))
+
+# print summary data
+print(
+  paste(
+    "We need to discard",
+    length(failed.probes1),
+    length(failed.probes2),
+    length(failed.probes3),
+    length(failed.probes4),
+    length(failed.probes5),
+    length(failed.probes6),
+    "and",
+    length(failed.probes7),
+    "probes as it was pointed during the analysis."
+  ),
+  sep = " "
+)
+
+print(
+  paste(
+    "In total we discard",
+    length(unique(failed.probes)),
+    "probes"
+  ),
+  sep = " "
+)
+tail(failed.probes)
+```
+
+### Compare with previous results
+- Probes remove from Rolf:
+  - Low detection pvalues: 2944
+  - Cross-reactive: 27224 (He used 450K)
+  - SNP sites: 8166# I used MAF=0
+  - XY problematic: 19120X+561Y=19681
+  - High intensity: 7137
+  - Low bead counts: He didn't applied this step.
+
+## Create density plots of failed probe sets
+### A difference in the distribution of beta-values may signal a genuine problem with probes. 
+
+```{r warning=FALSE, message=FALSE}
+library(gridExtra)
+library("RColorBrewer")
+
+palette(brewer.pal(9, 'Set1'))
+out.dir.plots = file.path("../../results/01_pre_process/03_probes_QC/plots")
+
+betas <- getBeta(sf.MSet)
+all.probes <- rownames(betas)
+
+# Plot+++++++
+pdf(file.path(out.dir.plots, "density_plots_failed_probes.pdf"))
+par(mfrow=c(4,2))
+
+# Unfiltered
+try(
+densityPlot(betas, main = "Unfiltered probe-set") 
+)
+# Filtered probe-set
+betas.filt <- betas[which(!(all.probes %in% failed.probes)),]
+try(
+densityPlot(
+  betas.filt,
+  main = "Filtered probe-set"
+  )
+)
+
+# Probes with low detection P-values
+try(
+densityPlot(
+  betas[which(all.probes %in% failed.probes2),],
+  main = "Low detection P-value"
+  )
+)
+# Cross-reactive
+try(
+densityPlot(
+  betas[which(all.probes %in% failed.probes3),],
+  main = "Crossreactive probes"
+  ) 
+)
+# Probes with SNPs at interrogation / extension site at MAF = 0.1
+try(
+densityPlot(
+  betas[which(all.probes %in% failed.probes4),],
+  main = "Probes with interfering SNP-sites"
+  )
+)
+# Probes xy problematic
+try(
+densityPlot(
+  betas[which(all.probes %in% failed.probes5),],
+  main = "XY problematic probes"
+  )
+)
+# Type I probes with high intensity signals
+try(
+densityPlot(
+  betas[which(all.probes %in% failed.probes6),],
+  main = "High intensity signal probes"
+  )
+)
+# Probes with low bead counts
+try(
+densityPlot(
+  betas[which(all.probes %in% failed.probes7),],
+  main = "Low bead counts"
+  )
+)
+
+dev.off()
+```
+
+## Remove failed probes
+### Filter MSet object
+ "In total we discard 108961 probes"
+I should have 757277 left
+
+```{r}
+# read list of probes for removal
+rm.probes <- unique(failed.probes)
+length(rm.probes)
+
+dim(sf.MSet)
+# Probe filtering
+r.probes.raw <- which(rownames(sf.MSet) %in% rm.probes)
+rp.sf.MSet <- sf.MSet[-r.probes.raw, ]
+dim(rp.sf.MSet)
+
+out.setObject <- file.path("../../results/01_pre_process/03_probes_QC/SetObjects/")
+save(rp.sf.MSet, file = file.path(out.setObject, "rp_sf_MSet.RData"))
+```
+
+
+```{r}
+group = rp.sf.MSet@colData$Group_detailed
+group2 = rp.sf.MSet@colData$Gender
+names <- rp.sf.MSet@colData$Sample_Name
+
+
+mdsPlot(
+  rp.sf.MSet,
+  sampGroups=group2,
+  sampNames = names,
+  legendNCol=2,
+  legendPos = "bottom"
+)
+```
+
+### References
+- Probes XY probes: https://epigeneticsandchromatin.biomedcentral.com/articles/10.1186/s13072-022-00477-0
+- Cross-reactive probes https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-1066-1
+
+- In house scripts:
+  - Cornel scripts
+  - Rolf Vedder scripts
+

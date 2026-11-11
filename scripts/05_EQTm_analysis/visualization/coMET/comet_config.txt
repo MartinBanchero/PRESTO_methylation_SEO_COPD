@@ -1,0 +1,28 @@
+# REQUIRED CORE SETTINGS
+disp.mydata=TRUE
+mydata.format=site
+cormatrix.format=cormatrix
+cormatrix.method=pearson
+
+# GENE TRACK ESSENTIALS (MUST HAVE THESE)
+genome=hg19
+dataset.geneE=hsapiens_gene_ensembl
+list.tracks=geneENSEMBL
+fontsize.gviz=12
+
+# DISPLAY SETTINGS
+disp.region=TRUE  # ABSOLUTELY CRITICAL FOR GENES
+disp.color.ref=TRUE
+disp.cormatrixmap=TRUE
+disp.color.bar=TRUE
+disp.association=FALSE
+
+# VISUALIZATION PARAMETERS
+sample.labels=CpG
+symbols=circle-fill
+lab.Y=log
+cormatrix.color.scheme=bluewhitered
+
+# OUTPUT CONTROL
+print.image=FALSE
+verbose=TRUE

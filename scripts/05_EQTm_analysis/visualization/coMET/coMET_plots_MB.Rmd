@@ -1,0 +1,233 @@
+---
+title: "03_coMET_plots"
+output: html_document
+date: "2025-31-03"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(coMET)
+library(rtracklayer)
+library(dplyr)
+```
+
+# I have to fix the order of the scripts, coMET should be done after DM and not in eqtm analysis.
+
+```{r}
+# load betas 
+load(
+  "../../../../results/01_pre_process/04_normalization/SetObjects/wtR_BMIQ_betas_norm_ftr.RData"
+)
+
+# EQTm
+res.eqtm <- "../../../../results/05_EQTm/assoc_CpG_GEX/1Mb_window_sig_CpG_GEX/fdr_sig_cpg_sig_CpG_GEX/"
+df.eqtm <- read.csv(
+                file.path(res.eqtm,
+                  "significant_CpG_GEX.csv"
+                  )
+                )
+# DM all significant ones
+filepath.all.res.limma <- "../../../../results/04_DM/new_final_only_specific_SEO_DMPs.csv"
+
+df.sig.cpgs.SEO.specific  <- read.csv(
+    filepath.all.res.limma,
+    row.names = "CpG.id"
+  )
+
+
+# DMs all significant with mean of betas > 5%
+res.DM.dir <- "../../../../results/04_DM/"
+
+all.res.limma <- readr::read_csv(
+  file.path(
+    res.DM.dir,
+    "new_final.sign.SEOvsCtrlES.cpgs.results.csv")
+  )
+
+df.sig.cpgs.SEO.specific
+```
+
+For each significant CpG in Top10:
+   a. Identify the chromosome and position.
+   b. Select 10 CpGs upstream and 10 downstream (if available) on the same chromosome.
+   c. Check that these CpGs are in the beta matrix, remove any missing.
+   d. If fewer than 3 CpGs remain, skip.
+   e. Write the data and correlation files.
+   f. Call comet.web with:
+        - image.size = 15 (or 20 if there are many genes) but within allowed sizes.
+        - list.tracks set to collapse transcripts.
+ We'll adjust the config file to have:
+   list.tracks=geneENSEMBL:collapseTranscripts=meta
+   
+```{r}
+library(coMET)
+library(dplyr)
+library(tibble)
+library("rtracklayer")
+
+comet.result.dir <- "../../../../results/05_EQTm/sig_DMPs_coMet_plots_AGER/"
+#c.result.dir <- "../../../results/06_corr_CpG_celltypes/coMET_CpG_per_celltype/ECvenous/"
+dir.create(comet.result.dir, recursive = TRUE, showWarnings = TRUE)
+betas <- t(BMIQ.betas.norm.ftr)
+#mydata <- df.sig.cpgs.keep[order(df.sig.cpgs.keep$adj.P.Val),]
+mydata <- all.res.limma[order(all.res.limma$adj.P.Val),]
+
+# top10 cpgs only
+#top10.sig.cpgs.keep <- head(df.sig.cpgs.keep, n=10)
+
+# all 112 significant
+df.sig.cpgs.SEO.specific$CpG.id <- rownames(df.sig.cpgs.SEO.specific)
+
+# cell types CpGs
+#bcell.cpgs <- c("cg00129232","cg10647833","cg23651812")
+#at2.cpgs <- c("cg09238049")
+#EC.arterial.cpgs <- c("cg00129232", "cg00766482", "cg08673857", "cg11253122")
+#EC.venous.cpgs <- c("cg09297514")
+
+# AGER CpG
+AGER.cpg <- c("cg26036029")
+
+filter.cell.type.cpgs <- function(df, cpgs) {
+  df %>% filter(CpG.id %in% cpgs)
+}
+df.sig.cpgs.keep <- filter.cell.type.cpgs(df.sig.cpgs.SEO.specific, AGER.cpg)
+
+run.n <- 0
+be.verbose <- FALSE
+
+# Fixed parameters
+n.cpgs.surround <- 10  # 10 CpGs on each side = 21 total CpGs (including target)
+allowed_sizes <- c(3.5, 7)  # Valid image sizes
+configfile <- file.path("./comet_config.txt")
+
+for (cpg in df.sig.cpgs.keep$CpG.id) { # run for top10 or 114 sig CpG
+  cpg <- as.character(cpg)
+  run.n <- run.n + 1
+  message("Processing ", run.n, "/", nrow(df.sig.cpgs.keep), ": ", cpg)
+  
+  # Create CpG directory
+  cpg.dir <- file.path(comet.result.dir, cpg)
+  dir.create(cpg.dir, recursive = TRUE, showWarnings = FALSE)
+  
+  # Get target CpG data
+  cpg.data <- mydata[mydata$CpG.id == cpg, ]
+  
+  # Validate data
+  if(nrow(cpg.data) == 0 || is.na(cpg.data$pos[1])) {
+    message("\tSkipping - missing position data")
+    next
+  }
+  
+  # Select 21 CpGs (10 each side + target)
+  chr_data <- mydata %>% 
+    filter(chr == cpg.data$chr[1]) %>%
+    arrange(pos)
+  
+  idx <- which(chr_data$CpG.id == cpg)
+  start_idx <- max(1, idx - n.cpgs.surround)
+  end_idx <- min(nrow(chr_data), idx + n.cpgs.surround)
+  
+  mydata.frame <- chr_data[start_idx:end_idx, ] %>%
+    dplyr::select(CpG.id, chr, pos, P.Value) %>%
+    dplyr::rename(TargetID = CpG.id,
+           MAPINFO = pos,
+           Pval = P.Value) %>%
+    arrange(MAPINFO)
+  
+  # Check for missing CpGs in beta matrix
+  missing_cpgs <- setdiff(mydata.frame$TargetID, colnames(betas))
+  if(length(missing_cpgs) > 0) {
+    message("\tRemoving missing CpGs: ", paste(missing_cpgs, collapse=", "))
+    mydata.frame <- mydata.frame[!mydata.frame$TargetID %in% missing_cpgs, ]
+  }
+  
+  # Skip if too few CpGs
+  if(nrow(mydata.frame) < 2) {
+    message("\tSkipping - only ", nrow(mydata.frame), " CpGs available")
+    next
+  }
+  
+  # Subset beta matrix
+  mydata.betas <- betas[, mydata.frame$TargetID, drop = FALSE]
+  
+  # Calculate correlation matrix
+  listcormatrix.data.raw <- cor(mydata.betas, use = "pairwise.complete.obs")
+  
+  # Write files
+  myinfofile <- file.path(cpg.dir, paste0("mydata_", cpg, ".txt"))
+  mycorrelationfile <- file.path(cpg.dir, paste0("mycorrelation_", cpg, ".txt"))
+  write.table(mydata.frame, myinfofile, sep = "\t", row.names = FALSE, quote = FALSE)
+  write.table(listcormatrix.data.raw, mycorrelationfile, sep = "\t", row.names = FALSE, quote = FALSE)
+  
+  # Use larger image size for gene tracks
+  #image_size <- ifelse(7 %in% allowed_sizes, 3.5, 7)
+  image_size <- 7
+  #########################################################################
+  # Add this check before the plotting section
+  library(GenomicRanges)
+  library(org.Hs.eg.db)
+  library(TxDb.Hsapiens.UCSC.hg19.knownGene) # or appropriate genome build
+  
+  # Check if the CpG is in a gene region
+  cpg_pos <- cpg.data$pos[1]
+  cpg_chr <- cpg.data$chr[1]
+  
+  # Create a GRanges object for the CpG
+  cpg_gr <- GRanges(seqnames = cpg_chr, ranges = IRanges(start = cpg_pos, end = cpg_pos))
+  
+  # Get nearby genes (within 50kb)
+  genes_nearby <- genes(TxDb.Hsapiens.UCSC.hg19.knownGene)
+  distance_to_genes <- distanceToNearest(cpg_gr, genes_nearby)
+  
+  if (is.na(mcols(distance_to_genes)$distance) || mcols(distance_to_genes)$distance > 50000) {
+    message("\tCpG is not near any known genes (distance > 50kb)")
+    # You might want to skip this CpG or extend the region
+    extend_region <- TRUE
+  } else {
+    message("\tNearest gene is ", mcols(genes_nearby[subjectHits(distance_to_genes)])$gene_id, 
+            " at distance ", mcols(distance_to_genes)$distance)
+    extend_region <- FALSE
+  }
+  # Add this check
+  if (!grepl("chr", cpg_chr)) {
+    cpg_chr <- paste0("chr", cpg_chr)
+    message("\tAdjusted chromosome name to: ", cpg_chr)
+  
+    # You might need to update your data accordingly
+    mydata.frame$chr <- cpg_chr
+  }
+  # Then use these in your comet.web call:
+  
+  #########################################################################
+  
+  # Plot with gene structure details
+  tryCatch({
+    comet.web(
+      config.file = configfile,
+      mydata.file = myinfofile,
+      cormatrix.file = mycorrelationfile,
+      mydata.ref = cpg,
+      pval.threshold = 0.05,
+      start = 32013573,#min(mydata.frame$MAPINFO),
+      end = 32931577, #max(mydata.frame$MAPINFO),
+      image.title = paste(cpg, "methylation in COPD vs Controls"),
+      image.name = file.path(cpg.dir, paste0(cpg, "_coMet_plot")),
+      image.type = "eps",
+      image.size = image_size,
+      print.image = TRUE,
+      verbose = be.verbose
+
+    )
+    message("\tSuccessfully created plot")
+  }, error = function(e) {
+    message("\tERROR: ", e$message)
+  })
+  
+  if (run.n == 1) be.verbose <- FALSE
+}
+```
+

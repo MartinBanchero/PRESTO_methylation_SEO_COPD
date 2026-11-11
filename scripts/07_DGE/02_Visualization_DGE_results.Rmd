@@ -1,0 +1,613 @@
+---
+title: "02_Visualization_DGE_results"
+output: html_document
+date: "2025-08-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(edgeR)
+library(ggbeeswarm)
+```
+
+```{r}
+file.DGE.SEO <- "../../results/07_DGE/GEX_SEO_exSmokers/SEOvsEXsmokers_DGE_results.csv"
+
+DGE.SEO <- read_csv(file.DGE.SEO,
+  show_col_types = FALSE
+) %>%
+  column_to_rownames(var = base::colnames(.)[1]) %>%
+  dplyr::filter(FDR < 0.05)
+
+file.DGE.cCOPD <- "../../results/07_DGE/GEX_cCOPD_exSmokers/cCOPDvsEXsmokers_DGE_results.csv"
+DGE.cCOPD <- read_csv(file.DGE.cCOPD,
+                    show_col_types = FALSE
+                    ) %>% column_to_rownames(var = base::colnames(.)[1]) %>%
+                  dplyr::filter(FDR < 0.05)
+
+file.sig.CpGs.SEO.specific.GEX <- "../../results/05_EQTm/assoc_CpG_GEX/1Mb_window_sig_CpG_GEX/fdr_sig_cpg_sig_CpG_GEX/significant_CpG_GEX.csv"
+
+EQTm.genes <- read_csv(file.sig.CpGs.SEO.specific.GEX,
+                    show_col_types = FALSE
+                    )
+```
+
+# Ven diagram (Upset package)
+# Keep the genes overlaping between EQTM genes and SEO
+1- I want the genes present only in SEO, when comparing with genes in cCOPD.
+2- The specific for SEO find the overlap with EQTm genes.(From the upset plot looks like 30 genes).
+
+```{r}
+result.dir.plots <- "../../results/07_DGE/Final_results/plots/"
+dir.create(result.dir.plots, recursive = TRUE)
+
+```
+
+
+```{r}
+# Extract unique gene symbols from each dataset
+seo_genes <- unique(DGE.SEO$gene.symbol)
+ccopd_genes <- unique(DGE.cCOPD$gene.symbol)
+eqtm_genes <- unique(EQTm.genes$gene.symbol)
+
+# 1. Find genes specific to SEO (present in SEO but NOT in cCOPD)
+seo_specific_genes <- base::setdiff(seo_genes, ccopd_genes)
+cat("Number of SEO-specific genes:", length(seo_specific_genes), "\n")
+
+# 2. Find overlap between SEO-specific genes and EQTm genes
+seo_specific_in_eqtm <- base::intersect(seo_specific_genes, eqtm_genes)
+cat("Number of SEO-specific genes that overlap with EQTm:", length(seo_specific_in_eqtm), "\n")
+
+# Display the overlapping genes
+if(length(seo_specific_in_eqtm) > 0) {
+  cat("Overlapping genes:", paste(seo_specific_in_eqtm, collapse = ", "), "\n")
+}
+
+# Create a binary matrix for UpSet plot
+all_genes <- unique(c(seo_genes, ccopd_genes, eqtm_genes))
+
+binary_matrix <- data.frame(
+  Gene = all_genes,
+  SEO = as.integer(all_genes %in% seo_genes),
+  cCOPD = as.integer(all_genes %in% ccopd_genes),
+  EQTm = as.integer(all_genes %in% eqtm_genes)
+)
+
+```
+
+```{r}
+library(UpSetR)
+library(tidyverse)
+
+# Create UpSet plot highlighting SEO-specific genes
+# Create the UpSet plot with corrected syntax
+plot <- upset(binary_matrix,
+            nsets = 3,# Number of sets to show
+            show.numbers = TRUE, 
+            nintersects = NA, # Show all intersections; set to a number to limit
+            order.by = "freq", # Order intersections by frequency
+            decreasing = TRUE, # Sort in descending order
+            mb.ratio = c(0.6, 0.35), # Ratio of main bar plot to matrix plot
+            number.angles = 0, # Angle of numbers on top bars
+            text.scale = c(1.3, 1.3, 1, 1, 1.5, 1), # Scale text sizes
+            point.size = 4, 
+            line.size = 1,
+            mainbar.y.label = "Intersection Size",
+            sets.x.label = "Set Size",
+            sets.bar.color = "gray", # Change bar color
+            matrix.color = "black")   # Change matrix dot color
+
+
+p_as_gg <- ggplotify::as.ggplot(plot)
+
+ggplot2::ggsave(
+  paste0(result.dir.plots,"upset_plot_eqtms_gex.svg"),
+  plot = p_as_gg,
+  device = "svg", 
+  dpi = 600,                 
+  width = 7,
+  height = 5,     
+  units = "in",
+  #type = "cairo" 
+)
+
+# Print the UpSet plot
+print(plot)
+```
+
+```{r}
+result.dir.tables <- "../../results/07_DGE/Final_results/tables/"
+dir.create(result.dir.tables, recursive = TRUE)
+
+# Create a summary table
+summary_table <- data.frame(
+  Category = c("Total SEO genes", 
+               "Total cCOPD genes", 
+               "Total EQTm genes",
+               "SEO-specific genes (not in cCOPD)",
+               "SEO-specific genes overlapping with EQTm"),
+  Count = c(length(seo_genes),
+            length(ccopd_genes),
+            length(eqtm_genes),
+            length(seo_specific_genes),
+            length(seo_specific_in_eqtm)
+            )
+)
+
+write.csv(summary_table, 
+         file.path(paste0(result.dir.tables, "summary_table.csv")),
+         row.names = FALSE
+         )
+# save SEO genes obtained with DGE-edgeR
+filename.SEO.genes <- file.path(
+  paste0(result.dir.tables, "seo_specific_genes.csv")
+)
+
+write.csv(data.frame(SEO_specific_genes = seo_specific_genes), 
+         filename.SEO.genes, row.names = FALSE)
+
+# Save the overlap between edgeR DGE SEO specific and eqtm genes
+filename.SEO.eqtm.genes <- file.path(
+  paste0(result.dir.tables, "seo_specific_in_eqtm.csv")
+)
+write.csv(data.frame(SEO_specific_in_EQTm = seo_specific_in_eqtm), 
+          filename.SEO.eqtm.genes, row.names = FALSE)
+
+# For more detailed analysis, create a comprehensive results table
+detailed_results <- binary_matrix %>%
+  mutate(SEO_specific = ifelse(SEO == 1 & cCOPD == 0, "Yes", "No"),
+         SEO_specific_in_EQTm = ifelse(SEO_specific == "Yes" & EQTm == 1, "Yes", "No"))
+
+# Save more detail results
+filename.gene.analysis <- file.path(
+  paste0(result.dir.tables, "detailed_gene_results.csv")
+)
+write.csv(detailed_results, filename.gene.analysis , row.names = FALSE)
+```
+
+
+```{r}
+df.SEO.in.eqtm <- EQTm.genes %>%
+                    dplyr::filter(gene.symbol %in% seo_specific_in_eqtm)
+filename.cpg.SEO.eqtm.genes <- file.path(
+  paste0(result.dir.tables, "cpg_and_genes_seo_specific_in_eqtm.csv")
+)
+write.csv(df.SEO.in.eqtm, filename.cpg.SEO.eqtm.genes, row.names = FALSE)
+
+df.SEO.in.eqtm
+```
+
+# Master table
+Should contain 38 CpGs with thei significance+ genes from EQTMs with thei significance+ GEX genes with their significance
+
+```{r}
+# Set-up final DMPs df
+file.cpgs <- "../../results/04_DM/new_final_only_specific_SEO_DMPs.csv"
+
+cpgs.58 <- read_csv(file.cpgs, show_col_types = FALSE) %>%
+  mutate(
+    "logFC.cpg" = logFC,
+    "P.Value.cpg" = P.Value,
+    "adj.P.Val.cpg" = adj.P.Val,
+    "abs.delta.mean.cpg" = abs.delta.mean
+  ) %>%
+  dplyr::select(
+    "CpG.id", "logFC.cpg", "P.Value.cpg", "adj.P.Val.cpg", "abs.delta.mean.cpg", "met.status"
+  )
+
+# Set-up eqtm significant DMPs-genes
+eqtm.sig <- EQTm.genes %>%
+  mutate(
+    "logFC.eqtm" = logFC,
+    "P.Value.eqtm" = P.Value,
+    "adj.P.Val.eqtm" = adj.P.Val,
+  ) %>%
+  dplyr::select(
+    "gene.symbol", "geneID", "CpG.id", "logFC.eqtm", "P.Value.eqtm", "adj.P.Val.eqtm"
+  )
+
+# Set-up DGE specific in SEO
+dge.seo <- DGE.SEO %>%
+  mutate(
+    "logFC.GEX" = logFC,
+    "logCPM.GEX" = logCPM,
+    "P.Value.GEX" = PValue,
+    "FDR.GEX" = FDR
+  ) %>%
+  dplyr::select(
+    "gene.symbol", "logFC.GEX", "logCPM.GEX", "FDR.GEX"
+  )
+
+# merge dge.SEO and eqtm.SEO
+merged.df <- eqtm.sig %>%
+  left_join(dge.seo, by = "gene.symbol") %>%
+  mutate(sig.GEX.genes = !is.na(logFC.GEX))
+
+# Final master table
+df.main.table <- cpgs.58 %>%
+        left_join(merged.df, by = "CpG.id")%>%
+        mutate(sig.cpg.eqtm = !is.na(gene.symbol)
+               )%>%
+        distinct()
+
+
+# save
+result.dir <- "../../results/"
+main.table <- file.path(
+  paste0(result.dir, "main_table_cpgs_eqtms_gex.csv")
+)
+write.csv(df.main.table, main.table, row.names = FALSE)
+
+
+# print
+df.main.table
+```
+
+```{r}
+df <- df.main.table %>%
+        select("gene.symbol", "adj.P.Val.eqtm") %>%
+        distinct()
+
+  
+```
+
+
+
+# Venn diagram top30 CpGs overlap with top30 eqtms cpgs, sorted by FDR
+
+```{r}
+library(VennDiagram)
+
+top30.cpgs <- df.main.table %>%
+  filter(!is.na(adj.P.Val.cpg)) %>%
+  arrange(adj.P.Val.cpg) %>%               # lowest p-values first
+  distinct(CpG.id, .keep_all = FALSE) %>%  # keep one per CpG.id (the best one)
+  slice_head(n = 30) %>%                   # take top 30 unique
+  pull(CpG.id)
+
+top30.eqtm.cpgs <- df.main.table %>%
+  filter(!is.na(adj.P.Val.eqtm)) %>%
+  arrange(adj.P.Val.eqtm) %>%               # lowest p-values first
+  distinct(CpG.id, .keep_all = FALSE) %>%  # keep one per CpG.id (the best one)
+  slice_head(n = 30) %>%                   # take top 30 unique
+  pull(CpG.id)
+
+# Install packages if needed
+# install.packages("VennDiagram")
+# install.packages("RColorBrewer")
+# install.packages("gridExtra")
+
+library(VennDiagram)
+library(RColorBrewer)
+library(gridExtra)
+
+# Create publication-quality Venn diagram
+venn.plot <- venn.diagram(
+  x = list(
+    top30.CpGs = top30.cpgs,
+    top30.CpGs.eQTMs = top30.eqtm.cpgs
+  ),
+  filename = NULL,
+  # Color scheme suitable for publications (colorblind friendly)
+  fill = brewer.pal(3, "Set2")[1:2], # or c("#66c2a5", "#fc8d62")
+  alpha = 0.7,
+  # Font sizes
+  cex = 1.8,        # Size of numbers in circles
+  cat.cex = 1.2,    # Size of category labels
+  cat.fontface = "bold",
+  # Category positions and colors
+  cat.dist = c(0.08, 0.08),
+  cat.pos = c(-20, 20),
+  cat.col = brewer.pal(3, "Set2")[1:2],
+  # Remove title if you'll add it separately
+  main = NULL,
+  main.cex = 1.8,
+  main.fontface = "bold",
+  # Margin and scaling
+  margin = 0.08,
+  scaled = TRUE,
+  # Circle line properties
+  lwd = 2,
+  lty = "solid",
+  # Resolution
+  resolution = 600
+)
+
+# For high-resolution saving
+tiff("../../results/07_DGE/Final_results/plots/vennDiagram/VennDiagram.tiff", width = 2000, height = 2000, res = 300, compression = "lzw")
+grid.draw(venn.plot)
+dev.off()
+
+# For PDF (vector format - preferred for publications)
+pdf("../../results/07_DGE/Final_results/plots/vennDiagram/VennDiagram.pdf", width = 8, height = 8, useDingbats = FALSE)
+grid.draw(venn.plot)
+dev.off()
+
+# To display on screen with better quality
+grid.draw(venn.plot)
+``` 
+# Venn diagram top30 eqtm genes overlap with top30 genes, sorted by FDR
+
+```{r}
+top30.eqtm.genes <- df.main.table %>%
+  filter(!is.na(adj.P.Val.eqtm)) %>%
+  arrange(adj.P.Val.eqtm) %>%               # lowest p-values first
+  distinct(gene.symbol, .keep_all = FALSE) %>%  # keep one per CpG.id (the best one)
+  slice_head(n = 30) %>%                   # take top 30 unique
+  pull(gene.symbol)
+
+top30.gex.genes <- df.main.table %>%
+  filter(!is.na(FDR.GEX)) %>%
+  arrange(FDR.GEX) %>%               # lowest p-values first
+  distinct(gene.symbol, .keep_all = FALSE) %>%  # keep one per CpG.id (the best one)
+  slice_head(n = 30) %>%                   # take top 30 unique
+  pull(gene.symbol)
+
+
+# Create publication-quality Venn diagram
+venn.plot <- venn.diagram(
+  x = list(
+    top30.eQTM.genes = top30.eqtm.genes,
+    top30.GEX.genes = top30.gex.genes
+  ),
+  filename = NULL,
+  # Color scheme suitable for publications (colorblind friendly)
+  fill = brewer.pal(3, "Set2")[1:2], # or c("#66c2a5", "#fc8d62")
+  alpha = 0.7,
+  # Font sizes
+  cex = 1.8,        # Size of numbers in circles
+  cat.cex = 1.2,    # Size of category labels
+  cat.fontface = "bold",
+  # Category positions and colors
+  cat.dist = c(0.08, 0.08),
+  cat.pos = c(-20, 20),
+  cat.col = brewer.pal(3, "Set2")[1:2],
+  # Remove title if you'll add it separately
+  main = NULL,
+  main.cex = 1.8,
+  main.fontface = "bold",
+  # Margin and scaling
+  margin = 0.08,
+  scaled = TRUE,
+  # Circle line properties
+  lwd = 2,
+  lty = "solid",
+  # Resolution
+  resolution = 600
+)
+
+# For high-resolution saving
+tiff(
+  "../../results/07_DGE/Final_results/plots/vennDiagram/VennDiagram_GEX.tiff",
+  width = 2000,
+  height = 2000,
+  res = 300,
+  compression = "lzw"
+)
+grid.draw(venn.plot)
+dev.off()
+
+overlap.top30.genes <- intersect(top30.eqtm.genes,top30.gex.genes)
+```
+
+```{r}
+df <- df.main.table %>%
+        filter(gene.symbol %in% overlap.top30.genes)
+
+result.dir <- "../../results/07_DGE/Final_results/tables/"
+top30.table <- file.path(
+  paste0(result.dir, "top30_cpgs_eqtms_gex.csv")
+)
+write.csv(df, top30.table, row.names = FALSE)
+
+unique(df$CpG.id)
+```
+
+## Boxplots for top genes
+PDK1, ZNF27, ZNF736, MYO1C, SERPINF1, C3, and AGER
+
+```{r}
+length(unique(df.main.table$CpG.id))
+length(unique(df.main.table$gene.symbol))
+
+df <- df.main.table %>%
+        dplyr::filter((sig.cpg.eqtm == TRUE) & (sig.GEX.genes == TRUE)) 
+
+length(unique(df$gene.symbol))
+```
+
+```{r}
+df.main.table <- read.csv("../../results/main_table_cpgs_eqtms_gex.csv") 
+
+#genes <- c("IGSF3", "ATP1A1", "ZNF736", "MYO1C", "SERPINF1", "AGER")
+genes <- "ZNF727"
+df.genes <- df.main.table %>%
+              dplyr::filter(gene.symbol %in% genes) %>%
+              dplyr::select(gene.symbol, geneID)
+ENS.geneID <- df.genes$geneID
+
+pheno.data.RNA.SEO <- read.csv("../../data/DGE/pheno_data_SEO_ex_smokers.csv", row.names = 1)
+rna.expression.SEO <- read.csv("../../data/DGE/raw_rna_SEO_&_ex_smokers.csv", row.names = 1)
+
+
+# Normalize counts for visualization
+dge <- DGEList(counts = rna.expression.SEO)
+dge <- calcNormFactors(dge, method = "TMM")
+logcpm <- cpm(dge, log = TRUE, prior.count = 3)
+
+# clean sample names in RNA mtx to match the names in methylation data
+colnames(logcpm) <- colnames(logcpm) |>
+  gsub("^X", "", x = _) |>
+  gsub("\\.", "-", x = _)
+
+# Prepare data for plotting
+plot_data <- logcpm[rownames(logcpm) %in% ENS.geneID, ] %>%
+              as.data.frame() %>%
+              tibble::rownames_to_column("ENS.GeneID")%>%
+              pivot_longer(-ENS.GeneID, names_to = "Sample", values_to = "Expression")%>%
+              left_join(
+                pheno.data.RNA.SEO[, c("GenomeScan_ID_RNAseq", "SEO_COPD_Y_or_N")],
+                by = c("Sample" = "GenomeScan_ID_RNAseq")
+                )
+head(plot_data)
+```
+
+
+
+
+```{r}
+source("../../scripts/utils/plotting_functions.R")
+plot.dir.save <- "../../results/07_DGE/Final_results/plots/top_genes_eqtm/"
+dir.create(plot.dir.save, recursive = TRUE)
+
+file.top = file.path(plot.dir.save, "gene_expression_faceted_boxplot_ZNF727.png")
+#svg(filename = file.top, width = 10, height = 11.67)
+png(filename = file.top)
+boxplots.top.genes(
+  genes = "ZNF727",
+  values = logcpm,
+  type = "logCPM",
+  pheno.color.var = pheno.data.RNA.SEO$SEO_COPD_Y_or_N,
+  id.mapping.df = df.main.table,
+  ensembl.id.col = "geneID",        # column name with ENSEMBL IDs
+  symbol.col = "gene.symbol"       # column name with gene symbols
+)
+
+dev.off()
+```
+
+```{r}
+boxplot.single.gene <- function(gene, values, type, pheno.color.var, id.mapping.df, 
+                               ensembl.id.col, symbol.col, result.dir) {
+  
+  # Create result directory if it doesn't exist
+  if (!dir.exists(result.dir)) {
+    dir.create(result.dir, recursive = TRUE)
+  }
+  
+  # Create mapping from symbol to ENSEMBL ID
+  mapping <- id.mapping.df[, c(ensembl.id.col, symbol.col)]
+  colnames(mapping) <- c("ensembl", "symbol")
+  
+  # Find ENSEMBL ID for requested gene
+  ensembl_id <- NULL
+  gene_label <- NULL
+  
+  # Check if gene is already an ENSEMBL ID in the matrix
+  if (gene %in% rownames(values)) {
+    ensembl_id <- gene
+    gene_label <- gene
+  } 
+  # Check if gene is a symbol that can be mapped
+  else {
+    matched <- mapping[mapping$symbol == gene & mapping$ensembl %in% rownames(values), ]
+    if (nrow(matched) > 0) {
+      ensembl_id <- matched$ensembl[1]
+      gene_label <- gene
+    } else {
+      stop(paste("Gene not found or not mappable:", gene))
+    }
+  }
+  
+  # Prepare data for the single gene
+  plot.data <- data.frame(
+    expression = as.numeric(values[ensembl_id, ]),
+    condition = pheno.color.var
+  )
+  
+  # Create the boxplot
+  box.plot <- ggplot(
+    plot.data,
+    aes(x = condition, y = expression, fill = condition)) +
+    geom_boxplot(
+      alpha = 0.9,
+      outlier.shape = NA,  # Hide outliers since we'll show all points
+      width = 0.6,
+      lwd = 1.2,           # Make all boxplot lines thicker
+      fatten = 2.5         # Specifically make the median line even thicker
+    ) +
+    geom_quasirandom( 
+      aes(color = condition),
+      dodge.width = 0.8,
+      alpha = 0.9,
+      size = 4,
+      shape = 21,             # shape 21 = circle with fill and border
+      color = "black",        # border (outline) color
+      stroke = 1.2            # thickness of the outline
+    ) +
+    labs(
+      title = paste("Gene Expression for", gene_label),
+      x = "Sample type",
+      y = paste0("Gene Expression (", type, ")"),
+      fill = "Condition"
+    ) +
+    scale_fill_manual(values = c("darkred", "cadetblue")) +
+    scale_color_manual(values = c("darkred", "cadetblue")) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+      axis.title.x = element_text(size = 20, face = "bold"),
+      axis.title.y = element_text(size = 20, face = "bold"),
+      axis.text.x  = element_text(size = 18),
+      axis.text.y  = element_text(size = 18),
+      legend.title = element_text(size = 13, face = "bold"),
+      legend.text  = element_text(size = 12),
+      legend.position = "top",
+      panel.grid = element_blank()   # Remove grid lines
+    )
+  
+  # Create filename
+  filename <- file.path(result.dir, paste0("boxplot_gene_", gene_label, ".svg"))
+  
+  # Save the plot
+  ggsave(
+    filename = filename,
+    plot = box.plot,
+    device = "svg",
+    width = 5,
+    height = 7,
+    dpi = 300
+  )
+  
+  return(box.plot)
+}
+
+# Usage examples:
+#boxplot.single.gene("ENSG00000123456", values, "log2(TPM)", pheno.color.var, 
+#                    id.mapping.df, "ensembl_id", "gene_symbol", "./results")
+file.top = file.path(plot.dir.save, "HQ_gene_expression_faceted_boxplot_AGER.png")
+boxplot.single.gene(
+  gene = "AGER",
+  values = logcpm,
+  "logCPM",
+  pheno.color.var = pheno.data.RNA.SEO$SEO_COPD_Y_or_N,
+  id.mapping.df = df.main.table,
+  "geneID",
+  "gene.symbol",
+  plot.dir.save
+  )
+
+```
+
+
+# Look at CpGs specific for cell types
+
+```{r}
+bcells <- c("cg00129232","cg08673857","cg23651812")
+df.SEO.in.eqtm.bcells <- EQTm.genes %>%
+                            dplyr::filter(CpG.id %in% bcells)
+
+filename.cpg.SEO.bcells.eqtm.genes <- file.path(
+  paste0(result.dir.tables, "bcells_cpg_and_genes_seo_specific_in_eqtm.csv")
+)
+write.csv(df.SEO.in.eqtm.bcells, filename.cpg.SEO.bcells.eqtm.genes, row.names = FALSE)
+
+# cg10647833 not present after filter
+df.SEO.in.eqtm.bcells
+```
+

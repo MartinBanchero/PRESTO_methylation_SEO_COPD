@@ -1,0 +1,810 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-10-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library("minfi")
+library("missMethyl") # Contain annot850K
+library(GenomicRanges)
+library(tidyverse)
+```
+
+```{r}
+DMPs.wbacon <- read.csv(
+  "../../results/05_DM/03b_DM_SEOCOPD_vs_nonCOPD_ES/DMP_COPDvsnonCOPD_results_wbacon_ENmix_filtered.csv", 
+  row.names = 2
+)
+
+DMPs.wbacon$CpG.id <- rownames(DMPs.wbacon)
+#DMPs.wbacon = DMPs.wbacon[1:10,]
+DMPs.wbacon$X <- NULL
+rDMPs.wbacon = DMPs.wbacon[DMPs.wbacon$fdr.bacon <0.05,]
+
+#rDMPs.wbacon = DMPs.wbacon %>%
+#                  dplyr::filter(DMPs.wbacon$pValue.bacon <9.42e-8)
+rDMPs.wbacon
+```
+
+```{r}
+DMPs.comCOPD.wbacon <- read.csv(
+                      file = "../../results/05_DM/03c_DM_COPDcommon_vs_nonCOPD/DMP_comCOPDvsnonCOPD_results_wbacon_ENmix_filtered.csv",
+)
+DMPs.comCOPD.wbacon$X <- NULL
+rDMPs.comCOPD.wbacon = DMPs.comCOPD.wbacon[DMPs.comCOPD.wbacon$fdr.bacon <0.05,]
+
+#rDMPs.comCOPD.wbacon = DMPs.comCOPD.wbacon %>%
+#                          dplyr::filter(DMPs.comCOPD.wbacon$pValue.bacon <9.42e-8)
+rDMPs.comCOPD.wbacon
+```
+```{r}
+DMPs.sevCOPD.wbacon <- read.csv(
+  file = "../../results/05_DM/03d_DM_sevCOPD_vs_ES/DMP_sevCOPDvsnonCOPD_results_wbacon_ENmix_filtered.csv"
+)
+DMPs.sevCOPD.wbacon$X <- NULL
+rDMPs.sevCOPD.wbacon = DMPs.sevCOPD.wbacon[DMPs.sevCOPD.wbacon$fdr.bacon <0.05,]
+#rDMPs.sevCOPD.wbacon = DMPs.sevCOPD.wbacon %>%
+#                           dplyr::filter(DMPs.sevCOPD.wbacon$pValue.bacon <9.42e-8)
+rDMPs.sevCOPD.wbacon
+```
+
+### Vendiagram between SEO-COPD and commonCOPD
+```{r}
+library(VennDiagram)
+
+set1 <-rDMPs.wbacon$CpG.id
+set2 <- rDMPs.comCOPD.wbacon$CpG.id
+set3 <- rDMPs.sevCOPD.wbacon$CpG.id
+
+# Create a Venn Diagram
+VennDiagram::venn.diagram(
+  x = list(`SEO-COPDvsCtrl_ES` = set1, comCOPDvsCtrl_ES = set2, stageIV_COPDvsCtrl_ES = set3),
+  #category.names = c("DMPs.wbacon$CpG.id", "DMPs.comCOPD.wbacon$CpG.id"),
+  filename = "venn-SEO-comCOPD-venn-SEO-comCOPD-severeCOPD2.png", # Set to NULL to plot directly in RStudio
+  output = TRUE,
+  fill = c("skyblue", "pink", "red"),
+  alpha = 0.5,
+  cat.col = c("black", "black", "black"),
+  cat.cex = 0.5
+)
+
+```
+
+## Get unique SEO-COPD GpCs
+The Venn diagram above shows 1303 "unique" DMPs for SEO vs ctrl_ES. I want to subset for those and continue downstream analysis.
+
+```{r}
+unique.cpgs.SEO = subset(set1, !(set1 %in% c(set2, set3)))
+rDMPs.wbacon.unique = rDMPs.wbacon[rDMPs.wbacon$CpG.id %in% unique.cpgs.SEO,]
+```
+
+# Check this for alternative DMR analysis
+https://support.bioconductor.org/p/94211/   
+
+```{r}
+ann850k <- minfi::getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+ann850k <- ann850k[, c("chr", "pos", "strand")]
+ann850k$CpG.id <- rownames(ann850k)
+head(ann850k)
+```
+
+
+```{r}
+explore_regression_results(rDMPs.wbacon.unique)
+```
+
+
+```{r}
+rDMPs.wbacon <- rDMPs.wbacon.unique %>%
+          dplyr::select(-`pos`,-`chr`)
+
+rownames(rDMPs.wbacon) <- rDMPs.wbacon$CpG.id  
+
+cpgs <- which(rownames(ann850k) %in% rDMPs.wbacon$CpG.id)
+annot <- ann850k[cpgs,]
+
+
+# merge annotations with DMPs
+DMPs.wbacon_annot <- merge(rDMPs.wbacon, annot, by="CpG.id", all=TRUE)
+head(DMPs.wbacon_annot)
+```
+
+# Check this for alternative DMR analysis
+https://support.bioconductor.org/p/94211/   
+
+## Get probe regions
+
+```{r}
+load("../../results/04_Normalization/SetObjects/ENmix_rp_sf_betas_filtered.RData")
+m.values = ENmix::B2M(ENmix_betaNorm.filt) # default a=100
+```
+
+
+```{r}
+# read GTF file with gene locations
+gtf <- read.table('../../docs/genes.gtf', header = F, skip = 5, sep="\t")
+genes.info <- gtf[gtf$V3 == "gene",]
+colnames(genes.info) <- c(
+  "seqname", "source", "feature", "start", "end", "score","strand", "frame","attribute"
+  )
+
+df <- as_tibble(str_split_fixed(genes.info$attribute, ';', 7))
+
+ENS.ID <- as_tibble(str_split_fixed(df$V1, ' ', 2))$V2
+gene.symbol <- as_tibble(str_split_fixed(df$V4, ' ', 3))$V3
+
+genes.info$ENS.ID <- ENS.ID
+genes.info$gene.symbol <- gene.symbol
+genes.info$attribute <- NULL
+genes.info$gene.symbol[genes.info$gene.symbol == "THRA1/BTR"] <- "SKAP1-AS2"
+
+head(genes.info)
+
+```
+
+## Transcription start site (TSS)
+
+```{r}
+cpgs.genes <- list()
+cpgs.genes$ids <- DMPs.wbacon_annot$CpG.id
+genes.close.to.cpgs <- list()
+
+for (i in c(1:nrow(DMPs.wbacon_annot))) {
+  gene.selection <- genes.info %>%
+    dplyr::filter(
+      seqname == DMPs.wbacon_annot[i, "chr"],
+      start %in% c(
+        (DMPs.wbacon_annot[i, "pos"][[1]]-1000000):(DMPs.wbacon_annot[i, "pos"][[1]]+1000000))
+      )%>%
+    dplyr::mutate(distance.tss = DMPs.wbacon_annot[i, "pos"][[1]] - start)
+  genes.close.to.cpgs[DMPs.wbacon_annot[i, "CpG.id"]][[1]] <- as.matrix(gene.selection)
+}
+
+cpgs.genes$genes <- genes.close.to.cpgs
+rm(gene.selection, genes.close.to.cpgs)
+
+head(DMPs.wbacon_annot)
+```
+### Comet
+
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+library(scales)
+
+# Sample data: create a dataframe with chromosomes, CpG locations, and differential methylation values
+
+data <- data.frame(
+  CpG = DMPs.wbacon_annot$CpG.id,
+  chr = DMPs.wbacon_annot$chr,
+  logFC = DMPs.wbacon_annot$logFC,  # Random beta differences
+  p_value = DMPs.wbacon_annot$pValue.bacon
+)
+
+# Optional: filter significant CpG sites
+#sig_data <- data %>%
+#  dplyr::filter(p_value < 0.05)
+
+# Create a basic comet plot
+ggplot(data, aes(x = chr, y = logFC)) +
+  geom_jitter(
+    aes(size = -log10(p_value),
+        color = logFC
+        ),
+    width = 0.2, alpha = 0.7) +
+  scale_color_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0
+    ) +
+  labs(
+    title = "Comet Plot of Differential Methylation by Chromosome",
+    x = "Chromosome",
+    y = "Methylation Difference (logFC)"
+    ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+    ) +
+  scale_size(
+    range = c(1, 10),
+    guide = guide_legend(title = "-log10(p-value)")
+    ) +
+  theme(legend.position = "right")
+
+
+```
+```{r}
+data[data$m.value.diff < -5,]
+```
+
+## Load RNAseq data
+
+```{r}
+# load RNA-seq data
+rna.expression <- readr::read_tsv(
+  file.path("../../data/RNA_PRESTO_RV/", "20200427_103972-001_rawcounts.txt"),
+  col_types = readr::cols(),
+) %>%
+  tibble::column_to_rownames("Gene")
+
+dim(rna.expression)
+```
+# Add metadata
+
+```{r}
+pheno.data.ids = read_tsv(
+  file = "../../docs/PRESTO_proteogenomics_full_data_set_v14.tsv"
+  #file = "../data/array_raw_data/idats/MET2020-242-014_wPRESTO.csv"
+  )%>%
+  dplyr::select(PRESTO_ID, GenomeScan_ID_RNAseq)
+
+phenoSEO = read_csv(
+      file="../../results/05_DM/03b_DM_SEOCOPD_vs_nonCOPD_ES/pheno.data_SEOvsCtrl_ES.csv"
+      )
+
+pheno.data <- merge(phenoSEO, pheno.data.ids, by = "PRESTO_ID")
+              
+rownames(pheno.data) <- pheno.data$Row.names
+
+pheno.data <- pheno.data[
+  pheno.data$GenomeScan_ID_RNAseq %in% colnames(rna.expression),
+  ]
+
+pheno.data <- pheno.data %>%
+        select_if(~ !any(is.na(.)))
+
+head(pheno.data)
+```
+
+
+```{r}
+rna.expression <- rna.expression[,pheno.data$GenomeScan_ID_RNAseq]
+print(dim(rna.expression))
+
+m.values.t <- t(m.values)
+meth <- m.values.t[rownames(pheno.data),]
+print(dim(meth))
+
+betas.t <- t(ENmix_betaNorm.filt)
+betas <- betas.t[rownames(pheno.data),]
+print(dim(betas))
+
+```
+
+# Run association between GEX and DMPs
+
+```{r}
+results.dir <- file.path("../../results/", "EQTm_analysis") 
+script.result.dir <- file.path(results.dir, "per_CpG")
+dir.create(script.result.dir, recursive=TRUE)
+results.cpgs <- list()
+```
+
+```{r}
+pheno.data$SEO_COPD_Y_or_N <- as.factor(pheno.data$SEO_COPD_Y_or_N)
+
+group <- c()
+i <- 1
+for (name in rownames(betas)) {
+  group[i] <- levels(
+    pheno.data$SEO_COPD_Y_or_N)[pheno.data[row.names(pheno.data) == name,"SEO_COPD_Y_or_N"][[1]]]
+  i <- i + 1
+}
+
+#levels(pheno.data$SEO_COPD_Y_or_N)[1]
+```
+
+```{r}
+significance.cutoff <- significance.cutoff.h.s.u <- 0.05 # FDR
+fc.cutoff <- 0
+
+significance.filter <- (function() {
+  sco <- significance.cutoff
+  fco <- fc.cutoff
+  
+  function(df) {
+    df %>%
+      dplyr::mutate(
+        fc.include = dplyr::case_when(
+          fco == 0 ~ TRUE,
+          TRUE ~ abs(logFC) > log2(fco)
+        )
+      ) %>%
+      dplyr::filter(
+        adj.P.Val <= sco &
+          fc.include
+      ) %>%
+      dplyr::select(-fc.include)
+  }
+})()
+```
+
+```{r}
+DMPs.wbacon_annot = DMPs.wbacon_annot[
+                        order(DMPs.wbacon_annot$fdr.bacon, decreasing = FALSE),]
+
+top10_DMPs.wbacon_annot <- DMPs.wbacon_annot[1:10,]
+top10_DMPs.wbacon_annot
+```
+
+```{r}
+library(patchwork)
+
+#options(bitmapType='cairo')
+
+for (i in c(1:nrow(top10_DMPs.wbacon_annot))) {
+  # create dir with cpg name
+  cpg <- top10_DMPs.wbacon_annot[i,"CpG.id"]
+  script.result.dir.cpg <- file.path(script.result.dir, cpg)
+  dir.create(script.result.dir.cpg, recursive=TRUE)
+  # add m.values to pheno.data
+  current.pheno.data <- cbind(pheno.data, meth[rownames(pheno.data), cpg])
+  names(current.pheno.data)[ncol(current.pheno.data)] <- "Methylation"
+  # add beta values to pheno.data
+  current.pheno.data <- cbind(current.pheno.data, betas[rownames(pheno.data), cpg])
+  names(current.pheno.data)[ncol(current.pheno.data)] <- "Betas"
+  # 
+  design <- model.matrix(
+    ~0 + Methylation,
+    data = current.pheno.data
+  )
+  
+  # select the genes close to cpg
+  rna.selection <- cpgs.genes$genes[cpg][[1]][,"ENS.ID"]
+  rna.expression.current <- as.matrix(rna.expression[, pheno.data$GenomeScan_ID_RNAseq])
+  colnames(rna.expression.current) <- rownames(pheno.data)
+  
+  # 
+  rna.expression.normalized.current <- rna.expression.current %>%
+    limma::voom() %>% # logCPM+ est mean-var relat, ready for lm
+    as.matrix()
+  
+  # QC of current genes
+  DGEL <- edgeR::DGEList(rna.expression.current)
+  keep <- edgeR::filterByExpr(DGEL, design)
+  DGEL <- DGEL[keep, , keep.lib.sizes=FALSE]
+  DGEL <- edgeR::calcNormFactors(DGEL, method = "TMM")
+  
+  # run the model
+  y <- limma::voom(DGEL, design, plot = F)
+  
+  original.fit <- limma::lmFit(
+    y,
+    design
+  )
+  
+  adjusted.fit <- limma::contrasts.fit(original.fit, coef = "Methylation")
+  adjusted.fit <- limma::eBayes(adjusted.fit, 0.05) # Calculate the t-statistics
+  
+  current.results <- limma::topTable(
+    adjusted.fit,
+    adjust = "BH",
+    coef = "Methylation",
+    sort.by = "P",
+    number = nrow(adjusted.fit)
+  )
+  
+  current.results <- current.results[rna.selection,]
+  current.results <- current.results[complete.cases(current.results),]
+
+  current.results$adj.P.Val <- p.adjust(current.results$P.Value, method = "BH")
+  
+  current.results %>%
+    as.data.frame() %>%
+    readr::write_csv(
+      file = file.path(script.result.dir.cpg, "results.csv")
+    )
+  
+  current.results %>%
+    significance.filter() %>%
+    readr::write_csv(
+      file = file.path(script.result.dir.cpg, "results.sign.csv")
+    )
+  results.cpgs[cpg][[1]] <- as.matrix(current.results)
+
+
+  if (!(length(rna.selection) == 0)) {
+    for (j in c(1:length(rna.selection))) {
+      current.ensembl.id <- cpgs.genes$genes[cpg][[1]][j,"ENS.ID"]
+     # if (rna.results[which(rna.results$ensembl_gene_id == current.ensembl.id),]$PValue <= 0.05) { ###
+      #  print("match rna results and current cpg-gene")
+        current.pheno.data.w.gene <- cbind(current.pheno.data, rna.expression.normalized.current[j,])
+        current.gene <- cpgs.genes$genes[cpg][[1]][j,"gene.symbol"]
+        current.ensembl.id <- cpgs.genes$genes[cpg][[1]][j,"ENS.ID"]
+        
+        names(current.pheno.data.w.gene)[ncol(current.pheno.data.w.gene)] <- "RNA.expr"
+        current.pheno.data.w.gene <- current.pheno.data.w.gene %>%
+            dplyr::filter(abs((RNA.expr - mean(RNA.expr))/sd(RNA.expr)) <= 3,
+            abs((Betas - mean(Betas))/sd(Betas)) <= 3)
+        
+        #group = group[1:length(group)-1]
+        scatter.current <- ggplot(current.pheno.data.w.gene, aes(x=RNA.expr, y=Betas)) +
+          geom_point(size=5, aes(colour=factor(SEO_COPD_Y_or_N), group=factor(SEO_COPD_Y_or_N))) +
+          geom_smooth(method='lm', mapping = aes(color=factor(SEO_COPD_Y_or_N)), se = FALSE) +
+          ylab("Methylation B values") +
+          xlab("RNA expression") +
+          labs(title = paste("Scatterplot of ", cpg, " methylation vs ", current.gene),
+               subtitle = paste("FDR p-value :", current.results[j, "adj.P.Val"])) +
+          ggprism::theme_prism() +
+          ggprism::scale_shape_prism() +
+          theme(text=element_text(size=30))
+          
+        sub.title1 <- paste("FDR p-value :", top10_DMPs.wbacon_annot[
+          which(
+            top10_DMPs.wbacon_annot$CpG.id == cpg),]$adj.P.Val, "and ")
+        sub.title2 <- paste(" :", round(-1*(
+            top10_DMPs.wbacon_annot[
+              which(
+                top10_DMPs.wbacon_annot$CpG.id == cpg),]$logFC), 5)
+            )
+        
+        boxplot.cpg <- ggplot(
+          current.pheno.data.w.gene,
+          mapping = aes(
+            x=factor(SEO_COPD_Y_or_N),
+            group=factor(SEO_COPD_Y_or_N),
+            y=Betas)
+          ) +
+          geom_boxplot(aes(colour=factor(SEO_COPD_Y_or_N), group=factor(SEO_COPD_Y_or_N))) +
+         
+          geom_point(size=5, position = "jitter") +
+          ylab("Methylation - B values") +
+          xlab("Group") +
+          labs(
+            title = paste("Boxplot compairing",cpg, "in Controls(ES) vs SEO-COPD"),
+            subtitle = substitute(
+              paste(st1, log[2]*FC, st2),
+              list(
+                st1=sub.title1,
+                st2=sub.title2))
+            ) +
+          ggprism::theme_prism() +
+          ggprism::scale_shape_prism() +
+          theme(text=element_text(size=30))
+        
+        p <- boxplot.cpg + scatter.current
+        
+        png(
+          filename = file.path(script.result.dir.cpg,
+                               paste(cpg, "vs", current.gene, "plot.png", sep = "_")
+                               ),
+          width =2800,
+          height = 1800,
+          units = "px",
+          pointsize = 24,
+          type = "cairo"
+          )
+        
+        print(p)
+        dev.off()
+        
+        # add comet plots here
+        
+      }
+    }
+ 
+}
+
+cpgs.genes$uncorr.results <- results.cpgs
+rownames(top10_DMPs.wbacon_annot) <- top10_DMPs.wbacon_annot$CpG.id
+cpgs.genes$adj.P.Val <- top10_DMPs.wbacon_annot[cpgs.genes$ids,]$adj.P.Val
+```
+
+### EQTm results
+```{r}
+results.dir <- file.path("../../results/", "EQTm_analysis") 
+result.eqtm <- file.path(results.dir, "EQTm_results")
+dir.create(result.eqtm, recursive=TRUE)
+```
+
+```{r}
+filtered_list <- cpgs.genes[cpgs.genes$ids %in% top10_DMPs.wbacon_annot$CpG.id]
+```
+
+```{r}
+eqtms.results <- data.frame()
+for (cpg in cpgs.genes$ids) {
+  print(cpg)
+  curr.cpg.frame <- cpgs.genes$uncorr.results[cpg][[1]]
+  curr.cpg.frame <- cbind(curr.cpg.frame, rep(cpg, nrow(curr.cpg.frame)))
+  colnames(curr.cpg.frame) <- c(colnames(curr.cpg.frame)[1:ncol(curr.cpg.frame)-1], "cpg.id")
+  eqtms.results <- rbind(eqtms.results, curr.cpg.frame)
+  }
+
+
+eqtm.results <- eqtms.results %>%
+  mutate(sign = as.double(adj.P.Val) <= 0.05) %>%
+  group_by(cpg.id) %>%
+  summarise(cnt = n(), significant=sum(sign)) %>%
+  readr::write_csv(
+      file = file.path(result.eqtm, "results.sign.eqtm.csv")
+    )
+
+```
+
+## CpG associated with genes
+
+```{r}
+cpgs.df <- data.frame()
+for (cpg in cpgs.genes$ids) {
+  cpgs.df <- rbind(cpgs.df, cbind(cpgs.genes$uncorr.results[cpg][[1]], rep(cpg, nrow(cpgs.genes$uncorr.results[cpg][[1]]))))
+}
+
+cpgs.df2 <- cpgs.df[complete.cases(cpgs.df),]
+
+
+cpgs.df <- cpgs.df2 %>%
+    rownames_to_column(var = "ENS.ID")
+
+attr(genes.info,"row.names") <- NULL
+
+cpgs.df <- cpgs.df %>%
+  mutate(
+    gene.symbol = (genes.info %>% column_to_rownames(var = "ENS.ID"))[ENS.ID, "gene.symbol"]
+    ) %>%
+  column_to_rownames("ENS.ID") %>%
+  dplyr::rename(CpG.id = V7) %>%
+  readr::write_csv(
+      file = file.path(result.eqtm, "results.sign.genes.cpgs.csv")
+    )
+  
+head(cpgs.df)
+```
+
+```{r}
+# GSEA
+
+cpgs.df[order(cpgs.df$t),] %>%
+  readr::write_csv(
+          file = file.path(result.eqtm, "gsea_list.csv")
+  )
+
+res.GSVA.rnk <- cpgs.df[order(cpgs.df$t),] %>%
+                as.data.frame() %>%
+                dplyr::select(t)
+              #write.table(col.names = FALSE, sep = "\t", quote = FALSE,
+                #              file = file.path(result.eqtm, "results.rnk")
+                 #           )
+
+res.GSVA <- cpgs.df %>%
+            as.data.frame() %>%
+            rownames_to_column(var = "ENSEMBL") %>%
+            dplyr::select(ENSEMBL)
+
+            #write.table(col.names = FALSE, sep = " ", quote = FALSE, row.names = FALSE,
+            #            file = file.path(result.eqtm, "results.txt")
+#          )
+
+
+# we want the log2 fold change 
+#gene_list <- cpgs.df$t
+gene_list <- as.numeric(res.GSVA.rnk$t)
+
+# name the vector
+names(gene_list) <- rownames(cpgs.df)
+
+# omit any NA values 
+gene_list <- na.omit(gene_list)
+
+# sort the list in decreasing order (required for clusterProfiler)
+gene_list = sort(gene_list, decreasing = TRUE)
+
+
+#res.GSVA <- read.txt(file = file.path(result.eqtm, "results.txt"))
+
+library(clusterProfiler)
+library(enrichplot)
+# we use ggplot2 to add x axis labels (ex: ridgeplot)
+library(ggplot2)
+
+
+gse <- gseGO(geneList=gene_list, 
+             ont ="ALL", 
+             keyType = "ENSEMBL", 
+             #nPerm = 10000, 
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = "org.Hs.eg.db", 
+             pAdjustMethod = "none")
+
+```
+
+
+```{r}
+
+require(DOSE)
+p1 <- dotplot(gse, showCategory=10, split=".sign", font.size=8) + facet_grid(.~.sign)
+
+png(filename = file.path(results.dir, paste("gse_dotplot.png", sep = "_")),
+            #width =2800,
+            height = 900,
+            units = "px",
+            res=100,
+            #pointsize = 100,
+            type = "cairo")
+        
+        print(p1)
+dev.off()
+
+```
+
+```{r}
+gse2 <- enrichplot::pairwise_termsim(gse)
+p <- emapplot(gse2, showCategory = 100)
+
+png(filename = file.path(results.dir, paste("gse_plot.png", sep = "_")),
+            width =1200,
+            height = 900,
+            units = "px",
+            #pointsize = 24,
+            type = "cairo")
+        
+        print(p)
+dev.off()
+
+```
+
+
+```{r}
+ridgeplot(gse2) + labs(x = "enrichment distribution")
+```
+
+
+# Comet plots
+
+```{r}
+make.comet <- function(mydata.frame, be.verbose=FALSE) {
+  
+  cpg.dir <- file.path(results.dir, cpg)
+  dir.create(cpg.dir, recursive=T)
+  setwd(cpg.dir)
+  
+  mydata.betas <- t(rna.expression[mydata.frame$TargetID,])
+  listcormatrix.data.raw <- as.data.frame(cor(mydata.betas)) %>%
+    rownames_to_column(var = "CpG.id") %>%
+    dplyr::select(-CpG.id)
+  rownames(listcormatrix.data.raw) <- colnames(listcormatrix.data.raw)
+  
+  listcormatrix.data.raw <- as.matrix(listcormatrix.data.raw)
+  
+  myinfofile <- file.path(cpg.dir, paste("mydata_", cpg ,".txt", sep = ""))
+  mycorrelationfile <- file.path(cpg.dir, paste("mycorrelation_", cpg ,".txt", sep = ""))
+  myexpressfile <- file.path(cpg.dir, paste("myexpression_", cpg ,".txt", sep = ""))
+  
+  write.table(mydata.frame, myinfofile, sep="\t")
+  write.table(listcormatrix.data.raw, mycorrelationfile, sep="\t")
+  write.table(myexpress.frame, myexpressfile, sep = "\t")
+  
+  comet.web(config.file=configfile,
+            mydata.file=myinfofile,
+            cormatrix.file=mycorrelationfile,
+            mydata.ref=cpg,
+            pval.threshold=0.05,
+            start=min(mydata.frame$MAPINFO),
+            end=max(mydata.frame$MAPINFO),
+            image.title=paste(cpg, " methylation in COPD vs Controls", sep = ""),
+            image.name=paste(cpg, "_coMet_plot", sep = ""),
+            image.type = "pdf",
+            print.image=TRUE,
+            verbose = be.verbose)
+}
+
+```
+
+```{r}
+results.dir <- file.path("../../results", "EQTm_analysis") 
+setwd(results.dir)
+
+configfile <- file.path("../../results/EQTm_analysis/comet_plots/comet_config.txt")
+
+result.eqtm.comet <- file.path(results.dir, "comet_plots")
+dir.create(result.eqtm.comet, recursive=T)
+setwd(result.eqtm.comet)
+
+
+rownames(genes.info) <- genes.info$ENS.ID
+for (cpg in cpgs.genes$ids) {
+  print(paste("before if",cpg))
+  if (!dim(cpgs.genes$uncorr.results[cpg][[1]])[1] == 0){
+    print(paste("inside if", cpg))
+    curr.cpg.frame <- cpgs.genes$uncorr.results[cpg][[1]]
+    curr.cpg.frame <- curr.cpg.frame %>%
+      as.data.frame() %>%
+      tibble::rownames_to_column("Gene") %>%
+      dplyr::left_join(
+        y = genes.info %>%
+          dplyr::select(gene.symbol,ENS.ID, start, seqname),
+        by = c("Gene" = "ENS.ID")
+      )
+    
+    # mydata.frame <- results[cpg,] %>%
+    #   dplyr::select(CpG.id,
+    #                 CHR,
+    #                 BP,
+    #                 P) %>%
+    #   rename(TargetID = CpG.id,
+    #          MAPINFO = BP,
+    #          Pval = P)
+    # 
+    # mydata.frame <- mydata.frame[order(mydata.frame$MAPINFO),]
+    mydata.frame <- curr.cpg.frame %>%
+      dplyr::select(Gene, start, seqname, P.Value) %>%
+      dplyr::rename(TargetID = Gene,
+             CHR = seqname,
+             MAPINFO = start,
+             Pval = P.Value)
+    
+    mydata.frame <- mydata.frame[complete.cases(mydata.frame),]
+    #mydata.frame$CHR <- as.numeric(gsub("chr", "", as.character(mydata.frame$CHR)))
+    mydata.frame
+  make.comet(mydata.frame)
+ }
+}
+```
+
+```{r}
+library("coMET")
+library("rtracklayer")
+
+cpg.dir <- file.path(result.eqtm.comet, cpg)
+dir.create(cpg.dir, recursive=T)
+setwd(cpg.dir)
+mydata.betas <- t(rna.expression[mydata.frame$TargetID,])
+
+listcormatrix.data.raw <- as.data.frame(cor(mydata.betas)) %>%
+  rownames_to_column(var = "CpG.id") %>%
+  dplyr::select(-CpG.id)
+
+rownames(listcormatrix.data.raw) <- colnames(listcormatrix.data.raw)
+listcormatrix.data.raw <- as.matrix(listcormatrix.data.raw)
+
+myinfofile <- file.path(cpg.dir, paste("mydata_", cpg ,".txt", sep = ""))
+mycorrelationfile <- file.path(cpg.dir, paste("mycorrelation_", cpg ,".txt", sep = ""))
+myexpressfile <- file.path(cpg.dir, paste("myexpression_", cpg ,".txt", sep = ""))
+
+write.table(mydata.frame, myinfofile, sep = "\t")
+write.table(listcormatrix.data.raw, mycorrelationfile, sep="\t")
+#write.table(myexpress.frame, myexpressfile, sep = "\t")
+
+comet.web(config.file=configfile,
+          mydata.file=myinfofile,
+          cormatrix.file=mycorrelationfile,
+          mydata.ref=cpg,
+          pval.threshold=0.05,
+          start=min(mydata.frame$MAPINFO),
+          end=max(mydata.frame$MAPINFO),
+          image.title=paste(cpg, " methylation in SEO-COPD vs Controls", sep = ""),
+          image.name=paste(cpg, "_coMet_plot", sep = ""),
+          image.type = "pdf",
+          print.image=TRUE,
+          verbose = TRUE)
+
+```
+
+
+
+```{r}
+conf <- write_file(configfile)
+```
+
+
+```{r}
+extdata <- system.file("extdata", package="coMET",mustWork=TRUE)
+configfile <- file.path(extdata, "config_cyp1b1_zoom_4webserver.txt")
+myinfofile <- file.path(extdata, "cyp1b1_infofile.txt")
+myexpressfile <- file.path(extdata, "cyp1b1_infofile_exprGene_region.txt")
+mycorrelation <- file.path(extdata, "cyp1b1_res37_rawMatrix.txt")
+
+comet.web(config.file=configfile, mydata.file=myinfofile, cormatrix.file=mycorrelation,
+    mydata.large.file=myexpressfile, print.image=FALSE,verbose=FALSE)
+```

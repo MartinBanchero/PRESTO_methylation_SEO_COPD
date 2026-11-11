@@ -1,0 +1,314 @@
+---
+title: "01_DGE"
+output: html_document
+date: "2025-08-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(patchwork)
+library(limma)
+library(edgeR)
+library(ggprism)
+library(ggpmisc)
+library(readr)
+```
+
+# Gene annotations
+
+```{r}
+gtf <- read.table('../../docs/genes.gtf', header = FALSE, skip = 5, sep = "\t")
+genes.info <- gtf[gtf$V3 == "gene", ]
+colnames(genes.info) <- c(
+  "seqname", "source", "feature", "start", "end", 
+  "score", "strand", "frame", "attribute"
+)
+
+df <- as_tibble(str_split_fixed(genes.info$attribute, ';', 7))
+ENS.ID <- as_tibble(str_split_fixed(df$V1, ' ', 2))$V2
+gene.symbol <- as_tibble(str_split_fixed(df$V4, ' ', 3))$V3
+
+genes.info$ENS.ID <- ENS.ID
+genes.info$gene.symbol <- gene.symbol
+genes.info$attribute <- NULL
+head(genes.info)
+```
+
+
+# SEO samples used for DMPs
+
+```{r}
+pheno.data = read_csv(
+  "../../results/04_DM/04a_DM_SEOCOPD_vs_nonCOPD_ES/pheno.data_SEOvsCtrl_ES.csv",
+  show_col_types = FALSE
+ )%>%
+  column_to_rownames(var = base::colnames(.)[1])
+head(pheno.data)
+```
+
+
+# cCOPD samples used for DMPs
+
+```{r}
+pheno.data.cCOPD = read_csv(
+  "../../results/04_DM/04b_DM_COPDcommon_vs_nonCOPD/pheno.data_comCOPDvsCtrl_ES.csv",
+  show_col_types = FALSE
+ )%>%
+  column_to_rownames(var = base::colnames(.)[1])
+head(pheno.data.cCOPD)
+
+```
+
+```{r}
+# load RNA-seq data
+rna.expression <- readr::read_tsv(
+  file.path("../../data/RNA_PRESTO_RV/", "20200427_103972-001_rawcounts.txt"),
+  col_types = readr::cols(),
+) %>%
+  tibble::column_to_rownames("Gene")
+dim(rna.expression)
+```
+
+# Set-up for SEO-COPD samples
+
+```{r}
+data.dir.dge <- "../../data/DGE/"
+
+# Verify samples in RNA data
+pheno.data.RNA.SEO <- pheno.data[
+  pheno.data$GenomeScan_ID_RNAseq %in% colnames(rna.expression),]
+write.csv(pheno.data.RNA.SEO, file.path(data.dir.dge, "pheno_data_SEO_ex_smokers.csv"))
+
+
+rna.expression.SEO <- rna.expression[,pheno.data.RNA.SEO$GenomeScan_ID_RNAseq]
+print(dim(rna.expression.SEO))
+
+write.csv(rna.expression.SEO, file.path(data.dir.dge, "raw_rna_SEO_&_ex_smokers.csv"))
+
+```
+
+# Set-up for cCOPD samples
+com_COPD_Y_or_N     n
+Control_ES         13
+common_COPD        26
+
+```{r}
+# Verify samples in RNA data
+pheno.data.RNA.cCOPD <- pheno.data.cCOPD[
+  pheno.data.cCOPD$GenomeScan_ID_RNAseq %in% colnames(rna.expression),]
+write.csv(pheno.data.RNA.cCOPD, file.path(data.dir.dge, "pheno_data_cCOPD_ex_smokers.csv"))
+
+rna.expression.cCOPD <- rna.expression[,pheno.data.RNA.cCOPD$GenomeScan_ID_RNAseq]
+write.csv(rna.expression.SEO, file.path(data.dir.dge, "raw_rna_cCOPD_&_ex_smokers.csv"))
+
+print(dim(rna.expression.cCOPD))
+```
+# Differential gene expression analysis with voom transformation
+
+```{r}
+dge.analysis <- function(rna.expression, pheno.data, group.var, contrast.var1, contrast.var2) {
+
+  # Convert group.var to a factor in pheno.data
+  pheno.data$group.var <- factor(pheno.data[[group.var]])
+  # Create design matrix - ensure factors are properly coded
+  design <- model.matrix(
+    ~0 + group.var + Gender + Age, 
+    data = pheno.data
+  )
+  colnames(design) <- make.names(colnames(design)) # Clean column names
+  print(colnames(design))
+  
+  # Create DGEList object
+  DGEL.voom <- edgeR::DGEList(
+    counts = rna.expression,
+    samples = pheno.data
+  )
+  
+  keep <- edgeR::filterByExpr(DGEL.voom, design = design)
+  DGEL.voom <- DGEL.voom[keep, , keep.lib.sizes = FALSE]
+  DGEL.voom <- edgeR::calcNormFactors(DGEL.voom, method = "TMM")
+  
+  # Apply voom and get weights
+  v <- limma::voom(DGEL.voom, design, plot = TRUE)
+  DGEL.voom$weights <- v$weights
+  DGEL.voom$design <- design
+  
+  # Estimate dispersion with weights
+  DGEL.voom <- edgeR::estimateDisp(DGEL.voom, design)
+  # Plot the genewise biological coefficient of variation (BCV) against gene abundance (in log2 counts per million).
+  plotBCV(DGEL.voom)
+
+  
+  # Fit GLM with weights
+  fit.ql <- edgeR::glmQLFit(DGEL.voom, design)
+  
+  # Test contrasts
+  contrasts <- limma::makeContrasts(
+    #test = group.varcommon_COPD - group.varControl_ES, # TODO fix this so I dont have to hardcode the contrast vars
+    test = group.varSEO_COPD - group.varControl_ES,
+    levels = design
+  )
+  
+  ql.results <- edgeR::glmQLFTest(fit.ql, contrast = contrasts[, "test"])
+  
+  # Get results
+  results.ql <- edgeR::topTags(
+    ql.results,
+    n = Inf,
+    adjust.method = "fdr",
+    sort.by = "PValue"
+   )
+  return(results.ql)
+}
+```
+
+
+```{r}
+# SEO
+#pheno.data.RNA.SEO
+#rna.expression.SEO
+#SEO_COPD_Y_or_N
+#SEO_COPD_Y_or_NControl_ES
+#SEO_COPD_Y_or_NSEO_COPD
+
+# SEO
+results.SEO <- dge.analysis(
+                  rna.expression.SEO,
+                  pheno.data = pheno.data.RNA.SEO,
+                  group.var = "SEO_COPD_Y_or_N",
+                  contrast.var1 = "SEO_COPD_Y_or_NSEO_COPD",
+                  contrast.var2 = "SEO_COPD_Y_or_NControl_ES"
+                  )
+
+head(results.SEO$table)
+```
+
+```{r}
+file = "../../results/05_EQTm/assoc_CpG_GEX/1Mb_window_sig_CpG_GEX/fdr_sig_cpg_sig_CpG_GEX/significant_CpG_GEX.csv"
+df.eqtm.genes <- read_csv(file, show_col_types = FALSE)
+eqtm.genes <- unique(df.eqtm.genes$geneID)
+```
+
+```{r}
+# Subset results to only include genes from eqtm analysis
+df.results.SEO <- results.SEO$table
+
+overlap.GEX.eqtm.genes <- df.results.SEO[rownames(df.results.SEO) %in% eqtm.genes, ]
+
+# Apply FDR correction only for the 247 genes
+overlap.GEX.eqtm.genes$FDR <- p.adjust(overlap.GEX.eqtm.genes$PValue, method = "fdr")
+
+# Sort by adjusted p-value
+overlap.GEX.eqtm.genes <- overlap.GEX.eqtm.genes[order(overlap.GEX.eqtm.genes$FDR), ]
+
+sig.DGE <- overlap.GEX.eqtm.genes %>%
+            dplyr::filter(FDR < 0.05)  
+dim(sig.DGE)
+
+# get results with standard FDR correction for comparison
+#head(results.SEO$table)
+GW.overlalap.GEX.eqtm.genes <- df.results.SEO[rownames(df.results.SEO) %in% eqtm.genes, ]
+
+sig.DGE.standard <- GW.overlalap.GEX.eqtm.genes %>%
+            dplyr::filter(FDR < 0.05)  
+dim(sig.DGE.standard)
+
+
+```
+
+
+
+# SEO
+
+```{r}
+# Set up output directory
+result.dir <- "../../results/07_DGE/"
+results.dir <- file.path(result.dir, "GEX_SEO_exSmokers")
+#script.result.dir <- file.path(sig.dir, "nominal_sig_cpg_sig_CpG_GEX")
+dir.create(results.dir, recursive = TRUE, showWarnings = FALSE)
+
+
+results.final <- overlap.GEX.eqtm.genes %>%
+  tibble::rownames_to_column(var = "ENS.ID") %>%
+  dplyr::left_join(genes.info, by = "ENS.ID") %>%
+  tibble::column_to_rownames(var = "ENS.ID") 
+
+# Save results
+write.csv(results.final, file.path(results.dir, "SEOvsEXsmokers_DGE_results.csv"))
+head(results.final)
+```
+
+
+sc
+
+```{r}
+# Set up output directory
+result.dir <- "../../results/07_DGE/"
+results.dir <- file.path(result.dir, "GEX_cCOPD_exSmokers")
+#script.result.dir <- file.path(sig.dir, "nominal_sig_cpg_sig_CpG_GEX")
+dir.create(results.dir, recursive = TRUE, showWarnings = FALSE)
+
+
+#pheno.data.RNA.cCOPD
+#rna.expression.cCOPD
+#com_COPD_Y_or_N
+#com_COPD_Y_or_NControl_ES
+
+# cCOPD
+results.cCOPD <- dge.analysis(
+                  rna.expression.cCOPD,
+                  pheno.data = pheno.data.RNA.cCOPD,
+                  group.var = "com_COPD_Y_or_N",
+                  contrast.var1 = " com_COPD_Y_or_Ncommon_COPD",
+                  contrast.var2 = "com_COPD_Y_or_NControl_ES"
+                  )
+
+head(results.cCOPD)
+```
+
+# cCOPD
+```{r}
+# Subset results to only include genes from previous study
+df.results.cCOPD <- results.cCOPD$table
+overlap.GEX.eqtm.genes.cCOPD <- df.results.cCOPD[rownames(df.results.cCOPD) %in% eqtm.genes, ]
+
+# Apply FDR correction only for the 250 genes
+overlap.GEX.eqtm.genes.cCOPD$FDR <- p.adjust(overlap.GEX.eqtm.genes.cCOPD$PValue, method = "fdr")
+
+# Sort by adjusted p-value
+overlap.GEX.eqtm.genes.cCOPD <- overlap.GEX.eqtm.genes.cCOPD[order(overlap.GEX.eqtm.genes.cCOPD$FDR), ]
+
+sig.DGE <- overlap.GEX.eqtm.genes.cCOPD %>%
+            filter(FDR < 0.05)  
+dim(sig.DGE)
+
+# Optional: Also get results with standard FDR correction for comparison
+#head(results.SEO$table)
+GW.overlalap.GEX.eqtm.genes.cCOPD <- df.results.cCOPD[rownames(df.results.cCOPD) %in% eqtm.genes, ]
+
+sig.DGE.standard <- GW.overlalap.GEX.eqtm.genes.cCOPD %>%
+            filter(FDR < 0.05)  
+dim(sig.DGE.standard)
+```
+
+```{r}
+results.final <- overlap.GEX.eqtm.genes.cCOPD %>%
+  tibble::rownames_to_column(var = "ENS.ID") %>%
+  dplyr::left_join(genes.info, by = "ENS.ID") %>%
+  tibble::column_to_rownames(var = "ENS.ID") 
+
+# Save results
+write.csv(results.final, file.path(results.dir, "cCOPDvsEXsmokers_DGE_results.csv"))
+head(results.final)
+```
+
+
+
+
+
+
+

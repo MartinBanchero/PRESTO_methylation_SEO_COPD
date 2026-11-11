@@ -1,0 +1,117 @@
+---
+title: "clinical_characteristics"
+author: "Martin"
+date: "2024-11-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+# Get samples that passed QC
+
+```{r}
+load("../../results/01_pre_process/03_probes_QC/SetObjects/rp_sf_MSet.RData")
+```
+
+```{r}
+df.pheno <- as.data.frame(rp.sf.MSet@colData)
+
+df.pheno.table <- df.pheno %>%
+                      dplyr::select(
+                        PRESTO_ID, Group_detailed, Group_simple, Gender, Age, Pack_years, FEV1_FVC_ratio_best, FEV1_percent_of_predicted_best
+                        ) %>% 
+                      dplyr::filter(
+                        (Group_detailed == "control es" | 
+                           Group_simple == "MS-COPD" |
+                           Group_simple == "SEO-COPD"
+                         )
+                        )%>%
+                      dplyr::mutate(
+                       groups.in.table = as.factor(
+                          dplyr::case_when(
+                          Group_simple == "Control" ~ "Control_ES",
+                          Group_simple =="MS-COPD" ~ "common_COPD",
+                          Group_simple =="SEO-COPD" ~ "SEO-COPD"
+                         )
+                        ) 
+                      )
+df.pheno.table
+```
+
+```{r}
+# Summarize data by groups.in.table
+summary_table <- df.pheno.table %>%
+  group_by(groups.in.table) %>%
+  summarise(
+    `Number of Subjects` = n(),
+    `Male` = sum(Gender == "m"),
+    `Female` = sum(Gender == "f"),
+    `Median Age` = median(Age),
+    `Age Range` = paste0(max(Age), "-", min(Age))
+  ) %>%
+  t() # Transpose the table to make each group a column
+
+# Convert to a data frame and adjust row and column names
+summary_table <- as.data.frame(summary_table)
+colnames(summary_table) <- summary_table[1, ]  
+summary_table <- summary_table[-1, ]           
+rownames(summary_table) <- c("Number of Subjects", "Male", "Female", "Median Age", "Age Range")
+
+# Print the final table
+print(summary_table)
+```
+
+```{r}
+df <- df.pheno.table %>%
+            filter(!is.na(Pack_years)
+                   ) %>%
+            as.data.frame()
+  
+
+df.pack <- df %>%
+            group_by(groups.in.table) %>%
+            summarise(
+               "Median Pack_years" = median(Pack_years) ,
+               "PY range" = paste0(max(Pack_years), " - ", min(Pack_years))
+            ) %>%
+            t()
+
+df.pack
+
+
+```
+
+```{r}
+df.FEV1_FVC_ratio <- df.pheno.table %>% 
+                        filter(!is.na(FEV1_FVC_ratio_best)
+                        ) %>%
+                        group_by(groups.in.table) %>%
+                        summarize(
+                        "Median_FEV1_FVC_ratio" = median(FEV1_FVC_ratio_best) ,
+                        "FEV1_FVC_ratio range" = paste0(
+                          max(FEV1_FVC_ratio_best), " - ", min(FEV1_FVC_ratio_best)
+                          )
+                        ) %>%
+                        t()
+
+df.FEV1_FVC_ratio
+```
+
+```{r}
+df.FEV1_pred <- df.pheno.table %>% 
+                        filter(!is.na(FEV1_percent_of_predicted_best)
+                        ) %>%
+                        group_by(groups.in.table) %>%
+                        summarize(
+                        "Median_FEV1%_predict" = median(FEV1_percent_of_predicted_best) ,
+                        "FEV1%_predict" = paste0(
+                          max(FEV1_percent_of_predicted_best), " - ", min(FEV1_percent_of_predicted_best)
+                          )
+                        )%>%
+                        t()
+
+df.FEV1_pred
+```

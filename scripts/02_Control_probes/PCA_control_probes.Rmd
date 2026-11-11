@@ -1,0 +1,126 @@
+---
+title: "PCA_control_probes"
+author: "Martin"
+date: "2024-04-03"
+output: html_document
+---
+
+## Control probes 
+The idea is to use the control probes to apply batch correction, the control probes in 850k Epic array are inherit from the 450k array. 
+We want to run PCA on control probes and the resulting PCs are used as linear predictors of the regression model.
+Here I followed the approach from Corneel, he took it from Lehne et al 2015.
+
+The following code is modified from script 1_intensities.sh, written by Benjamin Lehne (Imperial College London) and Alexander Drong (Oxford University) and publish in Lehne et al. 2015 Genome Biology 16:37  doi:10.1186/s13059-015-0600-x
+
+Here is explained:
+https://genomebiology.biomedcentral.com/articles/10.1186/s13059-015-0600-x
+
+# Lehne script to performe PCA
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(minfi)
+library(tidyverse)
+library("missMethyl") # Contains annot850K
+library(ENmix)
+```
+
+```{r}
+load("../../results/01_pre_process/02_sample_QC/SetObjects/sf_rgSet_ext.RData")
+dim(sf.rgSet_ext)
+```
+
+```{r}
+dataDirectory <- "../../data/array_raw_data/idats/"
+
+targets <- read.metharray.sheet(
+  dataDirectory,
+  pattern="MET2020-242-014_wPRESTO.csv",
+  recursive = T,
+  verbose = TRUE
+)
+
+
+splkeep = which(targets$sampleID %in% sf.rgSet_ext@colData$sampleID)
+targets = targets[splkeep,]
+dim(targets)
+targets
+```
+
+
+## Surrogates variables using ENmix
+
+```{r}
+sva <- ctrlsva(sf.rgSet_ext, npc = 1)
+df.sva <- as.data.frame(sva)
+print(dim(df.sva))
+
+
+file = "../../results/02_PCA_ctrl_probes/ENmix_sva_all_donors.csv"
+write.csv(x = sva, file = file, row.names = TRUE)
+```
+
+```{r}
+pheno.data <- data.frame(sf.rgSet_ext@colData)
+
+pheno.data$plate.nr <- factor(sub(
+  ".*?(plate_\\d+).*",
+  "\\1",
+  gsub(
+    "(?i)[ _]?[Pp]late (\\d+)",
+    "plate_\\1",
+    as.character(pheno.data$Sample_Plate),
+    perl = TRUE
+  )
+ ))
+
+pheno.data$Array <-  as.factor(pheno.data$Sentrix_Position)
+pheno.data$Slide <-  as.factor(pheno.data$Sentrix_ID)
+pheno.data$Isolation_day <-  as.factor(pheno.data$Isolation_day)
+
+
+ctrlprobes.scores = df.sva
+colnames(ctrlprobes.scores) = paste(colnames(ctrlprobes.scores), '_cp', sep='')
+
+
+if (identical(rownames(ctrlprobes.scores),rownames(pheno.data)) == FALSE) {
+    print("WARNING: rownames pca do not match rownames phenotypes")
+    }
+  
+n.pcs <- 7
+my.pees <- matrix(ncol = n.pcs, nrow = 3)
+colnames(my.pees) <- as.character(paste0(rep("PC",n.pcs),seq(1:n.pcs)))
+rownames(my.pees) <- c("Array","Slide", "Isolation_day")
+
+for (i in 1:n.pcs)  {
+  my.pees[,i] <- summary(
+    aov(ctrlprobes.scores[,i] ~ Array + Slide + Isolation_day,
+        data = pheno.data))[[1]][["Pr(>F)"]][1:3]
+}
+
+log.pees <- -log10(my.pees)
+
+```
+
+# Plot heatmap
+```{r}
+library(RColorBrewer)
+library(gplots)
+
+selcol <- colorRampPalette(brewer.pal(9,"YlOrRd"))
+
+heatmap.2(
+  log.pees,
+  Rowv = NA,
+  Colv = "Rowv", 
+  margins = c(5, 8),
+  cexRow = 0.9,
+  col = selcol(256),
+  trace = "none",
+  density.info="none"
+)
+
+```

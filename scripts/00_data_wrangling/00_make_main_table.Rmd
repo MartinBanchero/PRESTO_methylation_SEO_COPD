@@ -1,0 +1,149 @@
+---
+title: "00_combine_PRESTO_metadata_w_sample_sheet"
+author: "Martin"
+date: "2024-03-13"
+output: html_document
+---
+
+## Merge metadata
+I want to add the PRESTOID, case-control and gender to the sample sheet (target), finally I need a master table to use in downstream analysis. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+## Working dir
+
+```{r}
+results.dir.pheno <- file.path("../../results/00_data_wrangling/")
+dir.create(results.dir.pheno, recursive = TRUE)
+```
+
+
+```{r message=FALSE}
+# sample sheet
+df_sheet = readr::read_csv(
+  "../../data/array_raw_data/idats/MET2020-242-014.csv",
+  skip=8
+  )%>%
+  mutate(
+    sampleID =  dplyr::case_when(
+      Sample_Name == "F16-ii" ~ "F16",
+      Sample_Name == "X15-II" ~ "X15",
+      Sample_Name == "X7-ii" ~ "X7",
+      .default = Sample_Name
+      )
+ )%>%
+  dplyr::select(-one_of(c("Gender", "Pool_ID")))
+
+# PRESTO metadata
+cols.keep <- c(
+  "PRESTO_ID","MS_nr","Group_detailed","Group_simple","Group_numeric", "GenomeScan_ID_RNAseq",
+"SEO_COPD_Y_or_N","COPD_Y_or_N","Sample_date","Gender","Gender_binary","Age","Age_category","Height","Weight","BMI","Smoking_status","Pack_years","Years_since_smoking_cessation","FEV1_FVC_ratio_best","FEV1_percent_of_predicted_best"
+)
+
+df_presto = readr::read_csv(
+  "../../docs/no_col_remarks_PRESTO_proteogenomics_full_data_set_v14.csv"
+  )%>%
+  dplyr::select(
+    all_of(cols.keep)
+    )
+
+# Add PPRESTO col to df_sheet
+df_target = df_sheet %>%
+  left_join(
+    df_presto, by = c("sampleID"= "MS_nr")# IDK what is MS_nr(Ask Niek)
+    )
+
+df_target
+```
+
+## Add Isolation day for batch correction
+
+```{r}
+df = readr::read_csv(
+  "../../docs/iso_day.csv"
+  )%>%
+  dplyr::select(Sample_Nr, Isolation_day)
+
+
+df_target2 = df_target %>%
+  left_join(
+    df, by = c("sampleID"= "Sample_Nr")# IDK what is MS_nr(Ask Niek)
+    )%>%
+  mutate(
+    Isolation_day = ifelse(is.na(Isolation_day), "missing_date", Isolation_day)
+    )%>%
+  dplyr::select(-c(Sample_Group))
+
+# Rename samples
+rownames(df_target2) <- paste0(df_target2$Sentrix_ID ,"_", df_target2$Sentrix_Position)
+df_target2
+```
+```{r}
+df_target3 <- df_target2 %>%
+  dplyr::mutate(
+    Age = as.numeric(Age),
+    Gender = as.factor(Gender),
+    Smoking_status = as.factor(
+      dplyr::case_when(
+        Smoking_status == 0 ~ "ES",
+        Smoking_status == 1 ~ "CS",
+        Smoking_status == 2 ~ "NS",
+        Smoking_status == NA ~ "ALFA",
+      )),
+    COPD_Y_or_N = as.factor(
+      dplyr::case_when(
+      COPD_Y_or_N == 0 ~ "Control",
+      COPD_Y_or_N == 1 ~ "COPD"
+    )),
+    SEO_COPD_Y_or_N = as.factor(
+      dplyr::case_when(
+      SEO_COPD_Y_or_N == 0 ~ "Control",
+      SEO_COPD_Y_or_N ==1 ~ "SEO_COPD",
+      TRUE ~ as.character(SEO_COPD_Y_or_N)
+  ))
+)
+df_target3
+```
+# Add cell proportions
+Cell-type proportions estimated with MuSiC from the PRESTO bulk RNA-seq
+(`cell_proportions/music2/run_music2_4.R`, HLCA parenchyma reference, gene-length
+corrected bulk; plain MuSiC estimates, not MuSiC2). See the vault note
+"Cell-type deconvolution MuSiC2 PRESTO" for the cell-type choices and checks.
+
+New columns are prefixed `MuSiC_` (e.g. `MuSiC_AT1`, `MuSiC_Alveolar_macrophages`) so they
+never clash with the metadata columns or with the old CIBERSORTx columns
+(`Fibroblast.lineage`, `AT2`, ...) in `pheno.data_SEOvsCtrl_ES.csv`.
+
+```{r}
+# Which MuSiC run to use (folder in cell_proportions/music2/results/)
+MUSIC_RUN <- "music2_v7_split_lymphoid"   # or "music2_v6_custom_celltypes"
+
+music.prop <- readr::read_csv(
+  file.path("../../cell_proportions/music2/results", MUSIC_RUN, "PRESTO_music2_proportions.csv"),
+  show_col_types = FALSE
+)
+
+df_cp <- music.prop |>
+  dplyr::filter(method == "MuSiC") |>                                   # one row per RNA sample
+  dplyr::select(-dplyr::any_of(c("method", "PRESTO_ID", "Group_simple", "Group_detailed"))) |>
+  dplyr::rename_with(~ paste0("MuSiC_", gsub("[^A-Za-z0-9]+", "_", .x)), -GenomeScan_ID_RNAseq)
+stopifnot(!anyDuplicated(df_cp$GenomeScan_ID_RNAseq))
+
+pheno.data <- df_target3 %>%
+  left_join(df_cp, by = "GenomeScan_ID_RNAseq", na_matches = "never")
+stopifnot(nrow(pheno.data) == nrow(df_target3))   # join must not add or drop rows
+
+dim(pheno.data)
+colSums(!is.na(pheno.data[, grep("^MuSiC_", names(pheno.data))]))   # samples with proportions
+```
+
+```{r}
+meta.data = file.path(results.dir.pheno, "main_table_cell_proportions_MUSIC.csv")
+write_csv(
+  pheno.data, 
+  file = meta.data
+  )
+```

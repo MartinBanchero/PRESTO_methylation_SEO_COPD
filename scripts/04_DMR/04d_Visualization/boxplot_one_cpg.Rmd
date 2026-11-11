@@ -1,0 +1,494 @@
+---
+title: "boxplot_one_cpg"
+output: html_document
+---
+
+```{r}
+library(ggplot2)
+library(svglite)
+library(tidyverse)
+library(ggbeeswarm)
+library(edgeR)
+#library(patchwork)
+#library(ggprism)
+#library(ggpmisc)
+#library(readr)
+
+
+```
+
+
+```{r}
+load(
+  "../../../results/03_EDA/outliers_detection/mtx_mvalues_winsor.RData"
+)
+dim(win.m.values)
+
+
+load(
+  "../../../results/01_pre_process/04_normalization/SetObjects/wtR_BMIQ_betas_norm_ftr.RData"
+)
+dim(BMIQ.betas.norm.ftr)
+
+load(
+  "../../../results/01_pre_process/04_normalization/SetObjects/ENmixMSet_norm.RData"
+)
+dim(ENmixMSet.norm)
+
+pheno.data <- ENmixMSet.norm@colData
+sample_keep =  which(rownames(pheno.data) %in% base::colnames(win.m.values))
+pheno.data = pheno.data[sample_keep,]
+
+idx.subjects <- match(rownames(pheno.data), base::colnames(win.m.values))
+m.values <- win.m.values[,idx.subjects]
+dim(m.values)
+```
+```{r}
+dir.results <- file.path("../../../results/04_DM/04c_plots/boxplots/") 
+dir.create(dir.results, recursive=TRUE)
+
+```
+
+```{r}
+pheno.data <- data.frame(ENmixMSet.norm@colData)
+
+# commonCOPD vs non_COPD
+pheno.data = pheno.data %>%
+  dplyr::filter(
+    (
+    Group_detailed == "control es" |
+    Group_simple == "MS-COPD" |
+    Group_simple == "SEO-COPD" |
+    Group_simple == "S-COPD"
+    )
+    )%>%
+  dplyr::mutate(
+   COPD_state = as.factor(
+      dplyr::case_when(
+      Group_detailed == "control es" ~ "controls_es",
+      Group_simple == "MS-COPD" ~ "cCOPD",
+      Group_simple == "SEO-COPD" ~ "SEO_COPD",
+      Group_simple == "S-COPD" ~ "StageIV_COPD"
+      
+     )
+    ) 
+  )%>%
+  readr::write_csv(
+    .,
+    file = file.path(dir.results, "pheno.data_COPD_states.csv")
+    )
+pheno.data
+
+```
+
+```{r}
+BMIQ.betas<- BMIQ.betas.norm.ftr
+#m.values = ENmix::B2M(BMIQ.betas)
+#dim(m.values)
+
+# Remove sample from pheno.data that was removed by ENmix
+sample_keep =  which(rownames(pheno.data) %in% base::colnames(BMIQ.betas))
+pheno.data = pheno.data[sample_keep,]
+
+idx.subjects <- match(rownames(pheno.data), base::colnames(BMIQ.betas))
+beta.values <- BMIQ.betas[,idx.subjects]
+dim(beta.values)
+```
+## Boxplots CpG vs condition
+
+```{r}
+boxplot.single.cpg <- function(cpg, values, type, pheno.color.var, result.dir) {
+  # Create result directory if it doesn't exist
+  if (!dir.exists(result.dir)) {
+    dir.create(result.dir, recursive = TRUE)
+  }
+  
+  # Prepare data for the single CpG site
+  plot.data <- data.frame(
+    methylation = values[cpg, ],
+    condition = pheno.color.var
+  )
+  
+  # Define the desired order and colors
+  condition_order <- c("controls_es", "cCOPD","StageIV_COPD", "SEO_COPD")
+  color_palette <- c("controls_es" = "cadetblue", "cCOPD" = "pink","StageIV_COPD"="orange", "SEO_COPD" = "darkred")
+  
+  # Convert condition to factor with desired order
+  plot.data$condition <- factor(plot.data$condition, levels = condition_order)
+  
+  # Create the boxplot
+  box.plot <- ggplot(
+    plot.data,
+    aes(x = condition, y = methylation, fill = condition)) +
+    geom_boxplot(
+      alpha = 0.9,
+      outlier.shape = NA,  # Hide outliers since we'll show all points
+      position = position_dodge(width = 0.8),
+      width = 0.6,
+      lwd = 1.2,           # Make all boxplot lines thicker
+      fatten = 2.5         # Specifically make the median line even thicker
+    ) +
+    geom_quasirandom( 
+      aes(color = condition),
+      dodge.width = 0.8,
+      alpha = 0.9,
+      size = 4,
+      shape = 21,             # shape 21 = circle with fill and border
+      color = "black",        # border (outline) color
+      stroke = 1.2            # thickness of the outline
+    ) +
+    labs(
+      title = paste("Methylation Levels (", cpg, ")", sep = ""),
+      x = "Sample type",
+      y = paste0("methylation (", type, "-values)"),
+      fill = "Condition"
+    ) +
+    scale_fill_manual(values = color_palette) +
+    scale_color_manual(values = color_palette) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+      axis.title.x = element_text(size = 20, face = "bold"),
+      axis.title.y = element_text(size = 20, face = "bold"),
+      axis.line.x = element_line(color = "black", linewidth = 0.8),  # show x-axis line
+      axis.line.y = element_line(color = "black", linewidth = 0.8),  # show y-axis line
+      axis.text.x  = element_text(size = 18, angle = 90),
+      axis.text.y  = element_text(size = 18),
+      legend.title = element_text(size = 13, face = "bold"),
+      legend.text  = element_text(size = 12),
+      legend.position = "top",
+      panel.grid = element_blank()   # Remove grid lines
+    )
+
+# Create filename
+  filename <- file.path(result.dir, paste0("boxplot_COPD_all_state_", cpg, ".svg"))
+  
+  # Save the plot
+  ggsave(
+    filename = filename,
+    plot = box.plot,
+    device = "svg",
+    width = 5,
+    height = 7,
+    dpi = 300
+  )
+  
+  return(box.plot)
+}
+
+# Usage example:
+#result.dir <- "../../04_DMR/04d_Visualization/boxplots"
+pheno.color.var = pheno.data$COPD_state
+# cg26036029- AGER
+# cg21733531- ZNF727
+boxplot.single.cpg("cg26036029", beta.values, "beta", pheno.color.var, dir.results)
+```
+
+### DGE per condition
+
+```{r}
+# load RNA-seq data
+rna.expression <- readr::read_tsv(
+  file.path("../../../data/RNA_PRESTO_RV/", "20200427_103972-001_rawcounts.txt"),
+  col_types = readr::cols(),
+) %>%
+  tibble::column_to_rownames("Gene")
+dim(rna.expression)
+```
+
+# Set-up for SEO-COPD samples
+
+```{r}
+data.dir.dge <- "../../data/DGE/"
+
+# Verify samples in RNA data
+pheno.data.RNA.COPD.states <- pheno.data[
+  pheno.data$GenomeScan_ID_RNAseq %in% colnames(rna.expression),]
+
+rna.expression.COPD.states <- rna.expression[,pheno.data.RNA.COPD.states$GenomeScan_ID_RNAseq]
+print(dim(rna.expression.COPD.states))
+
+```
+
+
+```{r}
+
+df.main.table <- read.csv("../../../results/main_table_cpgs_eqtms_gex.csv") 
+
+
+#genes <- c("IGSF3", "ATP1A1", "ZNF736", "MYO1C", "SERPINF1", "AGER")
+genes <- "AGER"
+df.genes <- df.main.table %>%
+              dplyr::filter(gene.symbol %in% genes) %>%
+              dplyr::select(gene.symbol, geneID)
+ENS.geneID <- df.genes$geneID
+
+#pheno.data.RNA.SEO <- read.csv("../../data/DGE/pheno_data_SEO_ex_smokers.csv", row.names = 1)
+#rna.expression.SEO <- read.csv("../../data/DGE/raw_rna_SEO_&_ex_smokers.csv", row.names = 1)
+
+
+# Normalize counts for visualization
+dge <- DGEList(counts = rna.expression.COPD.states)
+dge <- calcNormFactors(dge, method = "TMM")
+logcpm <- cpm(dge, log = TRUE, prior.count = 3)
+
+# clean sample names in RNA mtx to match the names in methylation data
+colnames(logcpm) <- colnames(logcpm) |>
+  gsub("^X", "", x = _) |>
+  gsub("\\.", "-", x = _)
+
+# Prepare data for plotting
+plot_data <- logcpm[rownames(logcpm) %in% ENS.geneID, ] %>%
+              as.data.frame() %>%
+              tibble::rownames_to_column("ENS.GeneID")%>%
+              pivot_longer(-ENS.GeneID, names_to = "Sample", values_to = "Expression")%>%
+              left_join(
+                pheno.data.RNA.SEO[, c("GenomeScan_ID_RNAseq", "SEO_COPD_Y_or_N")],
+                by = c("Sample" = "GenomeScan_ID_RNAseq")
+                )
+head(plot_data)
+```
+
+```{r}
+plot.dir.save <- "../../../results/07_DGE/Final_results/plots/top_genes_eqtm/"
+dir.create(plot.dir.save, recursive = TRUE)
+
+```
+
+```{r}
+boxplot.single.gene <- function(gene, values, type, pheno.color.var, id.mapping.df, 
+                               ensembl.id.col, symbol.col, result.dir) {
+  
+  # Create result directory if it doesn't exist
+  if (!dir.exists(result.dir)) {
+    dir.create(result.dir, recursive = TRUE)
+  }
+  
+  # Create mapping from symbol to ENSEMBL ID
+  mapping <- id.mapping.df[, c(ensembl.id.col, symbol.col)]
+  colnames(mapping) <- c("ensembl", "symbol")
+  
+  # Find ENSEMBL ID for requested gene
+  ensembl_id <- NULL
+  gene_label <- NULL
+  
+  # Check if gene is already an ENSEMBL ID in the matrix
+  if (gene %in% rownames(values)) {
+    ensembl_id <- gene
+    gene_label <- gene
+  } 
+  # Check if gene is a symbol that can be mapped
+  else {
+    matched <- mapping[mapping$symbol == gene & mapping$ensembl %in% rownames(values), ]
+    if (nrow(matched) > 0) {
+      ensembl_id <- matched$ensembl[1]
+      gene_label <- gene
+    } else {
+      stop(paste("Gene not found or not mappable:", gene))
+    }
+  }
+  
+  # Prepare data for the single gene
+  plot.data <- data.frame(
+    expression = as.numeric(values[ensembl_id, ]),
+    condition = pheno.color.var
+  )
+  
+  # Create the boxplot
+  box.plot <- ggplot(
+    plot.data,
+    aes(x = condition, y = expression, fill = condition)) +
+    geom_boxplot(
+      alpha = 0.9,
+      outlier.shape = NA,  # Hide outliers since we'll show all points
+      width = 0.6,
+      lwd = 1.2,           # Make all boxplot lines thicker
+      fatten = 2.5         # Specifically make the median line even thicker
+    ) +
+    geom_quasirandom( 
+      aes(color = condition),
+      dodge.width = 0.8,
+      alpha = 0.9,
+      size = 4,
+      shape = 21,             # shape 21 = circle with fill and border
+      color = "black",        # border (outline) color
+      stroke = 1.2            # thickness of the outline
+    ) +
+    labs(
+      title = paste("Gene Expression for", gene_label),
+      x = "Sample type",
+      y = paste0("Gene Expression (", type, ")"),
+      fill = "Condition"
+    ) +
+    scale_fill_manual(values = c("cadetblue", "darkred")) +
+    scale_color_manual(values = c("cadetblue", "darkred")) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+      axis.title.x = element_text(size = 20, face = "bold"),
+      axis.title.y = element_text(size = 20, face = "bold"),
+      axis.text.x  = element_text(size = 18),
+      axis.text.y  = element_text(size = 18),
+      axis.line.x = element_line(color = "black", linewidth = 0.8),  # show x-axis line
+      axis.line.y = element_line(color = "black", linewidth = 0.8),  # show y-axis line
+      legend.title = element_text(size = 13, face = "bold"),
+      legend.text  = element_text(size = 12),
+      legend.position = "top",
+      panel.grid = element_blank()   # Remove grid lines
+    )
+  
+  # Create filename
+  filename <- file.path(result.dir, paste0("boxplot_gene_", gene_label, ".svg"))
+  
+  # Save the plot
+  ggsave(
+    filename = filename,
+    plot = box.plot,
+    device = "svg",
+    width = 5,
+    height = 7,
+    dpi = 300
+  )
+  
+  return(box.plot)
+}
+
+# Usage examples:
+#boxplot.single.gene("ENSG00000123456", values, "log2(TPM)", pheno.color.var, 
+#                    id.mapping.df, "ensembl_id", "gene_symbol", "./results")
+file.top = file.path(plot.dir.save, "HQ_gene_expression_faceted_boxplot_AGER.png")
+boxplot.single.gene(
+  gene = "AGER",
+  values = logcpm,
+  "logCPM",
+  pheno.color.var = pheno.data.RNA.SEO$SEO_COPD_Y_or_N,
+  id.mapping.df = df.main.table,
+  "geneID",
+  "gene.symbol",
+  plot.dir.save
+  )
+
+```
+```{r}
+boxplot.single.gene <- function(gene, values, type, pheno.color.var, id.mapping.df, 
+                               ensembl.id.col, symbol.col, result.dir) {
+  
+  # Create result directory if it doesn't exist
+  if (!dir.exists(result.dir)) {
+    dir.create(result.dir, recursive = TRUE)
+  }
+  
+  # Create mapping from symbol to ENSEMBL ID
+  mapping <- id.mapping.df[, c(ensembl.id.col, symbol.col)]
+  colnames(mapping) <- c("ensembl", "symbol")
+  
+  # Find ENSEMBL ID for requested gene
+  ensembl_id <- NULL
+  gene_label <- NULL
+  
+  # Check if gene is already an ENSEMBL ID in the matrix
+  if (gene %in% rownames(values)) {
+    ensembl_id <- gene
+    gene_label <- gene
+  } 
+  # Check if gene is a symbol that can be mapped
+  else {
+    matched <- mapping[mapping$symbol == gene & mapping$ensembl %in% rownames(values), ]
+    if (nrow(matched) > 0) {
+      ensembl_id <- matched$ensembl[1]
+      gene_label <- gene
+    } else {
+      stop(paste("Gene not found or not mappable:", gene))
+    }
+  }
+  
+  # Prepare data for the single gene
+  plot.data <- data.frame(
+    expression = as.numeric(values[ensembl_id, ]),
+    condition = pheno.color.var
+  )
+  # Define the desired order and colors
+  # Define the desired order and colors
+  condition_order <- c("controls_es", "cCOPD","StageIV_COPD", "SEO_COPD")
+  color_palette <- c("controls_es" = "cadetblue", "cCOPD" = "pink","StageIV_COPD"="orange", "SEO_COPD" = "darkred")
+  
+  # Convert condition to factor with desired order
+  plot.data$condition <- factor(plot.data$condition, levels = condition_order)
+  
+  # Create the boxplot
+  box.plot <- ggplot(
+    plot.data,
+    aes(x = condition, y = expression, fill = condition)) +
+    geom_boxplot(
+      alpha = 0.9,
+      outlier.shape = NA,  # Hide outliers since we'll show all points
+      width = 0.6,
+      lwd = 1.2,           # Make all boxplot lines thicker
+      fatten = 2.5         # Specifically make the median line even thicker
+    ) +
+    geom_quasirandom( 
+      aes(color = condition),
+      dodge.width = 0.8,
+      alpha = 0.9,
+      size = 4,
+      shape = 21,             # shape 21 = circle with fill and border
+      color = "black",        # border (outline) color
+      stroke = 1.2            # thickness of the outline
+    ) +
+    labs(
+      title = paste("Gene Expression for", gene_label),
+      x = "Sample type",
+      y = paste0("Gene Expression (", type, ")"),
+      fill = "Condition"
+    ) +
+    scale_fill_manual(values = color_palette) +
+    scale_color_manual(values = color_palette) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+      axis.title.x = element_text(size = 20, face = "bold"),
+      axis.title.y = element_text(size = 20, face = "bold"),
+      axis.text.x  = element_text(size = 18, angle = 90),
+      axis.text.y  = element_text(size = 18),
+      axis.line.x = element_line(color = "black", linewidth = 0.8),  # show x-axis line
+      axis.line.y = element_line(color = "black", linewidth = 0.8),  # show y-axis line
+      legend.title = element_text(size = 13, face = "bold"),
+      legend.text  = element_text(size = 12),
+      legend.position = "top",
+      panel.grid = element_blank()   # Remove grid lines
+    )
+  
+  # Create filename
+  filename <- file.path(result.dir, paste0("boxplot_COPD_all_states_gene_", gene_label, ".svg"))
+  
+  # Save the plot
+  ggsave(
+    filename = filename,
+    plot = box.plot,
+    device = "svg",
+    width = 5,
+    height = 7,
+    dpi = 300
+  )
+  
+  return(box.plot)
+}
+
+# Usage examples:
+#boxplot.single.gene("ENSG00000123456", values, "log2(TPM)", pheno.color.var, 
+#                    id.mapping.df, "ensembl_id", "gene_symbol", "./results")
+file.top = file.path(plot.dir.save, "HQ_gene_expression_faceted_boxplot_AGER.png")
+boxplot.single.gene(
+  gene = "AGER",
+  values = logcpm,
+  "logCPM",
+  pheno.color.var = pheno.data.RNA.COPD.states$COPD_state,
+  id.mapping.df = df.main.table,
+  "geneID",
+  "gene.symbol",
+  plot.dir.save
+  )
+
+```
+
+```

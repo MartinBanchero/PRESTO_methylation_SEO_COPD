@@ -1,0 +1,800 @@
+---
+title: "permutation_results"
+author: "Martin"
+date: "2024-12-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(tidyverse)
+source("../../utils/plotting_functions.R")
+```
+
+# Load the original results
+
+```{r}
+res.SEO.COPD <- read.csv(
+                  "../../../results/04_DM/04a_DM_SEOCOPD_vs_nonCOPD_ES/models/model_age_gender_PC1_7/limma_top_table_age_gender_PC1_7_model.csv",
+                  row.names = 1
+                  )
+res.cCOPD <- read.csv(
+                  "../../../results/04_DM/04b_DM_COPDcommon_vs_nonCOPD/DMPs_cCOPD/limma_top_table_age_gender.csv",
+                  row.names = 1)
+
+```
+
+
+# Permutation test
+Run permutation test using script fix_run_permutation_cluster.R for SEO-COPD and cCOPD. The script will generate a file with the CpGs that are significant by chance. The CpGs that are significant by chance will be removed from the original results.
+
+```{r}
+SEO.COPD.emp <- read.csv(
+  "../../../results/04_DM/04a_DM_SEOCOPD_vs_nonCOPD_ES/permutation/dm_SEOCOPD_results_with_cpg_permutated_pval_nBHcorr.csv",
+  row.names = 1
+  )%>%
+  dplyr::filter(P.Value.emp < 0.05)
+
+cCOPD.emp <- read.csv(
+  "../../../results/04_DM/04b_DM_COPDcommon_vs_nonCOPD/permutation/dm_cCOPD_results_with_cpg_permutated_pval_with_SEO_DMPs.csv",
+  row.names = 1
+  )%>%
+  dplyr::filter(P.Value.emp < 0.05)
+
+head(cCOPD.emp)
+```
+
+# Get final CpGs
+I want to keep CpGs that return an empirical p-value < 0.05, this CpGs are significant by chance. The next step is to compare which of my original significant CpGs are part of the random significant Cpgs. 
+
+```{r}
+sig.SEO.COPD <- res.SEO.COPD %>%
+    dplyr::filter(adj.P.Val < 0.05)
+
+# 9 random significant CpGs
+rand.cpgs.SEO <- sig.SEO.COPD[!rownames(sig.SEO.COPD) %in% SEO.COPD.emp$CpG, ]
+
+# non-random
+non.rand.cpgs.SEO <- sig.SEO.COPD[!rownames(sig.SEO.COPD) %in% rownames(rand.cpgs.SEO), ]
+
+non.rand.cpgs.SEO$CpG.id <- rownames(non.rand.cpgs.SEO)
+non.rand.cpgs.SEO 
+```
+# Save
+
+```{r}
+result.dir.cpgs <- "../../../results/04_DM/"
+file = file.path(result.dir.cpgs, "new_final_sign_cpgs_SEO_results_win.csv")
+
+readr::write_csv(
+  x = non.rand.cpgs.SEO,
+  file
+)
+```
+
+
+# commonCOPD
+I dont expect to filter any CpG, i already filter by emp pval. I wrote this code before when I use all CpGs.
+
+```{r}
+sig.cCOPD <- res.cCOPD %>%
+                      dplyr::filter(adj.P.Val < 0.05) 
+
+non.rand.cpgs.cCOPD <- sig.cCOPD[rownames(sig.cCOPD) %in% cCOPD.emp$CpG.id, ]
+non.rand.cpgs.cCOPD$CpG.id <- rownames(non.rand.cpgs.cCOPD)
+
+```
+
+
+```{r}
+result.dir.cpgs <- "../../../results/04_DM/"
+file = file.path(result.dir.cpgs, "new_final.sign.cpgs.cCOPDvsCtrlES_with_SEO.results.csv")
+
+readr::write_csv(
+  x = non.rand.cpgs.cCOPD,
+  file
+)
+```
+
+# Remove overlaping cCOPD DMPs from SEO-COPD
+676 from cCOPD in SEO-COPD
+
+```{r}
+final.non.rand.cpgs.SEO.cCOPD <- non.rand.cpgs.SEO[
+  !non.rand.cpgs.SEO$CpG.id %in% non.rand.cpgs.cCOPD$CpG.id,]
+
+final.non.rand.cpgs.SEO.cCOPD
+```
+
+```{r}
+result.dir.cpgs <- "../../../results/04_DM/"
+file = file.path(result.dir.cpgs, "new_final.sign.SEOvsCtrlES.cpgs.results.csv")
+
+readr::write_csv(
+  x = final.non.rand.cpgs.SEO.cCOPD,
+  file
+)
+```
+
+Overview of how i got the final dmp from limma to here.
+- Sig SEO.COPD CpGs = 22253
+- Sig empirical pval.emp < 0.05 SEO.COPD CpGs = 35838
+- final non-random significant CpGs = non overlap (35838 and 22253) = 22253
+  - This means that from the 23110 dmp only 9 where obtained by random chance.
+- Non-random cCOPD = 676
+- final.non.rand.cpgs.SEO = 22253 - 676 = 21577
+
+The 21577 CpGs are significant differential methylated sites, corrected by inflation using permutation analysis.
+
+
+# Plotting and visualiztion
+
+```{r}
+load(
+  "../../../results/03_EDA/outliers_detection/mtx_mvalues_winsor.RData"
+)
+dim(win.m.values)
+
+load(
+  "../../../results/01_pre_process/04_normalization/SetObjects/ENmixMSet_norm.RData"
+)
+dim(ENmixMSet.norm)
+
+pheno.data <- read.csv("../../../results/04_DM/04a_DM_SEOCOPD_vs_nonCOPD_ES/pheno.data_SEOvsCtrl_ES.csv",
+                       row.names = 1
+                       )
+
+pheno.data
+```
+
+```{r}
+sample_keep =  which(rownames(pheno.data) %in% base::colnames(win.m.values))
+pheno.data = pheno.data[sample_keep,]
+
+idx.subjects <- match(rownames(pheno.data), base::colnames(win.m.values))
+m.values <- win.m.values[,idx.subjects]
+dim(m.values)
+```
+
+
+# Subset by biological relevant range
+- final.non.rand.cpgs.SEO = 22425
+The filter I apply is the following:
+- Those CpGs with logFC > 0.6 (~1.50 times higher in ex-smokers)
+and mean > 0.2 and < 0.8 for both SEO and controls ex-smokers.
+
+# Repeat for all the CpGs
+The filtering I applied above is to reduce noisy CpGs with extremly low Pvalues and almost no logFC. These are significant mostly due to technical bias, I cannot coorect for batch effects due to the stremly low number of samples. 
+Steps followed from all the CpGs tested (754425):
+- I remove the 9 random CpGs, 676 cCOPD specific.
+- Next, I filter by delta betas > 0.05, in beta values is 5 % difference in methylation, and keep betas between 0.2 and 0.8. 
+- Use the remaining CpGs to make the volcano plot.
+- Final number of CpGs 7947 represented in the Volcano.
+
+```{r}
+# ------------------------------------------------------------------------------
+# STEP 1: Subset betas matrix per condition
+# ------------------------------------------------------------------------------
+mtx.win.betas <- as.matrix(ENmix::M2B(m.values))
+
+# Match samples in the beta matrix with metadata
+ctrl.samples <- pheno.data[pheno.data$SEO_COPD_Y_or_N == "Control_ES",]  # Samples in the control group
+seo.COPD.samples <- pheno.data[pheno.data$SEO_COPD_Y_or_N == "SEO_COPD",] # Samples in the disease group
+
+# ------------------------------------------------------------------------------
+# STEP 2: Filter out random and cCOPD-specific CpGs
+# ------------------------------------------------------------------------------
+# Remove random CpGs from significant results
+filtered.cpgs <- res.SEO.COPD[!rownames(res.SEO.COPD) %in% rownames(rand.cpgs.SEO), ]
+# Further remove cCOPD-specific CpGs
+filtered.cpgs <- filtered.cpgs[!rownames(filtered.cpgs) %in% non.rand.cpgs.cCOPD$CpG.id, ]
+
+# ------------------------------------------------------------------------------
+# STEP 3: Subset to Ctrl and COPD betas
+# ------------------------------------------------------------------------------
+
+# Identify CpGs present in both results and beta value matrix
+keep.cpgs <- which(rownames(filtered.cpgs) %in% rownames(win.m.values))
+
+# Extract beta values for these CpGs
+beta.matrix <- mtx.win.betas[keep.cpgs, ]
+
+# Separate into control and COPD groups
+ctrl.betas <- beta.matrix[, colnames(beta.matrix) %in% rownames(ctrl.samples)]
+
+#copd.betas <- beta.matrix[, rownames(seo.COPD.samples)]
+copd.betas <- beta.matrix[, colnames(beta.matrix) %in% rownames(seo.COPD.samples)]
+
+# ------------------------------------------------------------------------------
+# STEP 4: Calculate mean methylation levels
+# ------------------------------------------------------------------------------
+
+# Calculate mean beta values (convert to percentages for interpretation)
+# Calculate means using row names for safety
+filtered.cpgs$mean.ctrl <- rowMeans(ctrl.betas, na.rm = TRUE)[rownames(filtered.cpgs)]
+filtered.cpgs$mean.copd <- rowMeans(copd.betas, na.rm = TRUE)[rownames(filtered.cpgs)]
+
+# Convert to percentages
+filtered.cpgs$mean.ctrl.pct <- filtered.cpgs$mean.ctrl * 100
+filtered.cpgs$mean.copd.pct <- filtered.cpgs$mean.copd * 100
+
+# Calculate methylation differences
+filtered.cpgs$delta.mean <- filtered.cpgs$mean.copd - filtered.cpgs$mean.ctrl
+filtered.cpgs$delta.mean.pct <- filtered.cpgs$mean.copd.pct - filtered.cpgs$mean.ctrl.pct
+filtered.cpgs$abs.delta.mean <- abs(filtered.cpgs$delta.mean)
+
+# ------------------------------------------------------------------------------
+# STEP 5: Apply final filters
+# ------------------------------------------------------------------------------
+
+# Define filtering criteria
+MIN_DELTA <- 0.05      # 5% minimum methylation difference
+MIN_BETA <- 0.2         # Lower bound for mean beta value
+MAX_BETA <- 0.8         # Upper bound for mean beta value
+
+# Apply filters:
+# 1. Absolute methylation difference > 5%
+# 2. Mean beta values between 20-80% in both groups
+filtered.cpgs <- filtered.cpgs[
+  filtered.cpgs$abs.delta.mean > MIN_DELTA &
+  filtered.cpgs$mean.copd > MIN_BETA & filtered.cpgs$mean.copd < MAX_BETA &
+  filtered.cpgs$mean.ctrl > MIN_BETA & filtered.cpgs$mean.ctrl < MAX_BETA,
+]
+
+
+filtered.cpgs.same.direction <- filtered.cpgs %>%
+    mutate(same_direction = ifelse(
+      (logFC > 0 & delta.mean > 0) |
+      (logFC < 0 & delta.mean < 0),
+      TRUE, FALSE
+    )) %>%
+    dplyr::filter(same_direction == TRUE)
+
+# View results
+head( )
+```
+
+# Idea to filter CpGs using 99% quantile to filter robust CpGs
+
+```{r}
+# Generate percentiles to understand the distribution
+# all.abs.logFC <- abs(filtered.cpgs3$logFC)
+# 
+# effect_size_percentiles <- quantile(
+#   all.abs.logFC,
+#   probs = c(0.5, 0.75, 0.9, 0.95, 0.99, 1.0),
+#   na.rm = TRUE
+#   )
+# print("Distribution of Absolute M-value LogFC:")
+# print(effect_size_percentiles)
+# 
+# # Choose a threshold that represents the top 1% of effect sizes.
+# logFC_threshold <- effect_size_percentiles["99%"]
+# print(paste("Chosen effect size threshold (99th percentile):", round(logFC_threshold, 3)))
+# 
+# # Explore the data
+# print(paste0("Total significant probes: ", dim(filtered.cpgs3[filtered.cpgs3$adj.P.Val < 0.05,])[1])) 
+# # 0 < LogFC
+# print(
+#   paste0(
+#     "Significant probes and 99% percentile LogFC: ",
+#     dim(filtered.cpgs[filtered.cpgs3$adj.P.Val < 0.05 & filtered.cpgs3$logFC > logFC_threshold,])[1]
+#     )
+#   )
+# 
+# df <- filtered.cpgs3 %>%
+#         dplyr::filter(adj.P.Val < 0.05 & 
+#                         logFC > logFC_threshold |
+#                         logFC < -logFC_threshold
+#                         )
+# df
+
+```
+
+
+```{r}
+explore_regression_results <- function(DMPs) {
+  # Explore the data
+  total_sig <- sum(DMPs$adj.P.Val < 0.05, na.rm = TRUE)
+  pos_sig <- sum(DMPs$adj.P.Val < 0.05 & DMPs$logFC > 0, na.rm = TRUE)
+  neg_sig <- sum(DMPs$adj.P.Val < 0.05 & DMPs$logFC < 0, na.rm = TRUE)
+  
+  print(paste0("Total significant probes: ", total_sig)) 
+  print(paste0("Significant probes with positive LogFC: ", pos_sig))
+  print(paste0("Significant probes with negative LogFC: ", neg_sig))
+}
+#explore_regression_results(filtered.cpgs)
+explore_regression_results(filtered.cpgs.same.direction)
+```
+
+
+# Plot Volcano
+Some steps:
+1) Remove random significant CpGs.
+2) Plot volcano plot with top 10 CpGs by adjusted p-value.
+
+library(ggplot2)
+# Save plot with editable fonts
+svglite("plot.svg")
+ggplot(mtcars, aes(x = wt, y = mpg)) + geom_point()
+dev.off()
+
+```{r}
+library(svglite)
+
+source("../04d_Visualization/volcano_plots.R")
+
+vc.plots.result.dir <- "../../../results/04_DM/permutation_cCOPD_SEOCOPD/plots/volcano/"
+dir.create(vc.plots.result.dir, recursive = TRUE)
+
+#filtered.results
+filtered.cpgs<- filtered.cpgs.same.direction
+filtered.cpgs$CpG.id <- rownames(filtered.cpgs)
+#filtered.cpgs$CpG <- NULL
+
+to.plot.filt <- filtered.cpgs %>%
+                  dplyr::filter(logFC < 4 & logFC > -4)
+
+df.vc.plot <- volcanoplot.mutate(to.plot.filt)
+vc.plot <- make.volcano.plot(df.vc.plot)
+
+
+ggplot2::ggsave(
+  "volcano_plot_sig_non-random_cpgs3.svg",
+  plot = vc.plot,
+  path = vc.plots.result.dir,
+  dpi = 100,                 
+  width = 7,
+  height = 9,     
+  units = "in",
+  device = "svg"
+)
+
+```
+
+
+## Check top 10 cpgs
+```{r}
+top10.cpgs <- filtered.cpgs %>%
+                 dplyr::filter(adj.P.Val < 0.05
+                         )%>%
+                  head(n=10)
+
+v.top10 <- rownames(top10.cpgs)
+v.top10
+```
+
+
+```{r}
+plots.result.dir <- "../../../results/04_DM/permutation_cCOPD_SEOCOPD/plots/"
+dir.boxplots <- file.path(plots.result.dir, "boxplots/")
+dir.create(dir.boxplots, recursive = TRUE)
+
+
+file.top = file.path(
+  dir.boxplots,
+  "top10_most_sig_cpgs_mean_filtered_permuted_boxplot.svg"
+  )
+svg(
+  filename = file.top,
+  width = 10,  # SVG uses inches, so adjust accordingly
+  height = 11.67  # 3500px / 300dpi = ~11.67 inches
+)
+
+boxplots.top.cpgs(
+  top.sites = v.top10,
+  values = beta.matrix,
+  type = "beta",
+  pheno.color.var = pheno.data$SEO_COPD_Y_or_N
+)
+dev.off()
+```
+
+```{r}
+boxplot.single.cpg <- function(cpg, values, type, pheno.color.var, result.dir) {
+  # Create result directory if it doesn't exist
+  if (!dir.exists(result.dir)) {
+    dir.create(result.dir, recursive = TRUE)
+  }
+  
+  # Prepare data for the single CpG site
+  plot.data <- data.frame(
+    methylation = values[cpg, ],
+    condition = pheno.color.var
+  )
+  # Define the desired order and colors
+  condition_order <- c("Control_ES", "SEO_COPD")
+  color_palette <- c("Control_ES" = "cadetblue", "SEO_COPD" = "darkred")
+  
+  # Convert condition to factor with desired order
+  plot.data$condition <- factor(plot.data$condition, levels = condition_order)
+  
+  # Create the boxplot
+  box.plot <- ggplot(
+    plot.data,
+    aes(x = condition, y = methylation, fill = condition)) +
+    geom_boxplot(
+      alpha = 0.9,
+      outlier.shape = NA,  # Hide outliers since we'll show all points
+      position = position_dodge(width = 0.8),
+      width = 0.6,
+      lwd = 1.2,           # Make all boxplot lines thicker
+      fatten = 2.5         # Specifically make the median line even thicker
+    ) +
+    geom_quasirandom( 
+      aes(color = condition),
+      dodge.width = 0.8,
+      alpha = 0.9,
+      size = 4,
+      shape = 21,             # shape 21 = circle with fill and border
+      color = "black",        # border (outline) color
+      stroke = 1.2            # thickness of the outline
+    ) +
+    labs(
+      title = paste("Methylation Levels (", cpg, ")", sep = ""),
+      x = "Sample type",
+      y = paste0("methylation (", type, "-values)"),
+      fill = "Condition"
+    ) +
+    scale_fill_manual(values = color_palette) +
+    scale_color_manual(values = color_palette) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+      axis.title.x = element_text(size = 20, face = "bold"),
+      axis.title.y = element_text(size = 20, face = "bold"),
+      axis.line.x = element_line(color = "black", linewidth = 0.8),  # show x-axis line
+      axis.line.y = element_line(color = "black", linewidth = 0.8),  # show y-axis line
+      axis.text.x  = element_text(size = 18),
+      axis.text.y  = element_text(size = 18),
+      legend.title = element_text(size = 13, face = "bold"),
+      legend.text  = element_text(size = 12),
+      legend.position = "top",
+      panel.grid = element_blank()   # Remove grid lines
+    )
+  
+  # Create filename
+  filename <- file.path(result.dir, paste0("boxplot_", cpg, ".svg"))
+  
+  # Save the plot
+  ggsave(
+    filename = filename,
+    plot = box.plot,
+    device = "svg",
+    width = 5,
+    height = 7,
+    dpi = 300
+  )
+  
+  return(box.plot)
+}
+
+# Usage example:
+result.dir <- "../../../results/04_DM/04c_plots/boxplots/"
+pheno.color.var = pheno.data$SEO_COPD_Y_or_N
+# cg26036029- AGER
+# cg21733531- ZNF727
+boxplot.single.cpg("cg21733531", beta.matrix, "beta", pheno.color.var, result.dir)
+```
+
+
+```{r}
+source("../../utils/plotting_functions.R")
+
+gene.cpg <- filtered.cpgs %>%
+                  filter(CpG.id == "cg21733531")
+cpg.to.plot <- gene.cpg$CpG.id
+
+results.dir <- "../../../results/07_DGE/Final_results/plots/"
+file.top = file.path(
+  results.dir,
+  "sig_cpgs_ZNF727_mean_filtered_permuted_boxplot.png"
+  )
+
+png(
+  filename = file.top,
+  width = 3000,
+  height = 3500,
+  res = 300
+)
+
+
+boxplots.top.cpgs(
+  top.sites = cpg.to.plot,
+  values = beta.matrix ,
+  type="beta",
+  fdr="0.0295",
+  pheno.color.var = pheno.data$SEO_COPD_Y_or_N
+)
+dev.off()
+```
+
+## Swarm with mean
+
+# Example usage:
+# Assuming:
+# - top.sites is a character vector of CpG IDs
+# - values is a matrix of methylation values with CpGs as rows
+# - pheno.color.var is a factor with "disease" and "ctrl" levels
+
+```{r}
+source("../../utils/plotting_functions.R")
+
+dir.swarm.plot <- file.path(plots.result.dir, "swarmplots/")
+dir.create(dir.swarm.plot, recursive = TRUE)
+
+file.path <- file.path(
+  paste0(dir.swarm.plot, "top10_sig_cpgs_filter_mean_permuted_swarm_with_SEO.svg")
+)
+
+svg(
+  filename = file.path,
+  width = 10,
+  height = 11,
+)
+
+swarm.with.group.means(
+  top.sites = v.top10,
+  values = beta.matrix,
+  pheno.color.var = pheno.data$SEO_COPD_Y_or_N
+  )
+
+dev.off()
+```
+
+```{r}
+file.path <- file.path(
+  paste0(dir.swarm.plot, "top10_sig_cpgs_filter_mean_permuted_swarm_with_SEO2.svg")
+)
+
+svg(
+  filename = file.path,
+  width = 10,  # SVG uses inches, so adjust accordingly
+  height = 11.67  # 3500px / 300dpi = ~11.67 inches
+)
+
+swarm.with.group.means(
+  top.sites = v.top10,
+  values = beta.matrix,
+  pheno.color.var = pheno.data$SEO_COPD_Y_or_N
+  )
+
+dev.off()
+```
+
+
+# standard swarmplots
+
+```{r}
+source("../../utils/plotting_functions.R")
+
+dir.create(dir.swarm.plot, recursive = TRUE)
+
+file.path <- file.path(
+  paste0(dir.swarm.plot, "most_sig_cpgs_permuted_swarm_with_SEO.png")
+)
+
+png(
+  filename = file.path,
+  width = 3100,
+  height = 3000,
+  res = 300
+)
+swarm.nocolor.plot(
+  top.sites = v.top10,
+  values = mtx.win.betas,
+  m.or.beta = "beta",
+  pheno = pheno.data$SEO_COPD_Y_or_N
+  )
+
+dev.off()
+```
+
+
+# Top 10 CpGs
+- Top 10 CpGs by adjusted p-value on final.non.rand.cpgs.SEO.cCOPD.
+- Top 10 CpGs after filtered by delta median > 0.01 and median > 0.1 and < 0.9.for both conditions using "filtered.results".
+
+
+# Save significant CpGs
+
+```{r}
+status.DMPs.SEO <- filtered.cpgs %>%
+    dplyr::filter(adj.P.Val < 0.05) %>%
+    dplyr::mutate(met.status = ifelse(logFC > 0, "hypermethylated", "hypomethylated"))
+    
+
+result.dir.cpgs <- "../../../results/04_DM/"
+file = file.path(result.dir.cpgs, "new_final_only_specific_SEO_DMPs.csv")
+
+readr::write_csv(
+  x = status.DMPs.SEO,
+  file
+)
+```
+
+# Conclusions
+From this analysis I take the 116 CpGs for downstream analysis. Important to note that the adj.P.Val from the original fit are not very far from the threshold 0.05.
+
+
+# Manhattan plots 
+
+```{r}
+#source("../04d_Visualization/manhattan_plot.R")
+manh.plots.result.dir <- "../../../results/04_DM/permutation_cCOPD_SEOCOPD/plots/manhattan/"
+dir.create(manh.plots.result.dir, recursive = TRUE)
+
+# Filtered.results
+
+filtered.cpgs$CpG.id <- filtered.cpgs$CpG
+filtered.cpgs$CpG <- NULL
+
+significance.cutoff <- 0.05
+manh.plot <- filtered.cpgs %>%
+                mutate(  
+                Legend = dplyr::case_when(
+                adj.P.Val > significance.cutoff ~ "Not.Significant",
+                logFC < 0 ~ "Hypomethylated",
+                logFC > 0 ~ "Hypermethylated",
+                TRUE ~ "Not.Significant")
+                )
+
+to.manh.plot <- manh.plot %>%
+  dplyr::mutate(
+    chr = chr %>%
+      stringr::str_replace(
+        pattern = "chr",
+        replacement = ""
+      ) %>%
+      as.numeric()
+  ) %>%
+  dplyr::rename(
+    CHR = chr,
+    BP = pos,
+    P = P.Value
+  ) %>%
+  dplyr::filter(
+    !is.na(BP)
+  )
+
+ready.to.manh.plot <- to.manh.plot %>%
+  dplyr::rename(SNP = CpG.id) %>%
+  dplyr::select(BP, CHR, P, SNP)
+
+
+volcanoplot.fc.filter <- function(df) {
+  if (fc.cutoff > 0) {
+    df %>%
+      dplyr::filter(
+        logFC >= log2(fc.cutoff)
+      )
+  } else {
+    df
+  }
+}
+
+y.bar.intercept <- to.manh.plot %>%
+  dplyr::filter(
+    as.character(Legend) != "Not.Significant"
+  ) %>%
+  volcanoplot.fc.filter() %>%
+  dplyr::pull(P) %>%
+  max() %>%
+  log10() %>%
+  (function(x) {x * -1})
+
+colnames(ready.to.manh.plot) <- c("POS", "CHR", "pvalue", "SNP")
+
+ fdr.threshold <- max(
+    ready.to.manh.plot$pvalue[to.manh.plot$adj.P.Val < 0.05],
+    na.rm = TRUE
+  )
+ 
+# Convert chromosome to numeric (handles "chrX" etc)
+ready.to.manh.plot <- ready.to.manh.plot %>%
+  mutate(
+    CHR = as.numeric(gsub("chr", "", CHR)), # Remove "chr" prefix
+    POS = as.numeric(POS),                  # Ensure position is numeric
+    pvalue = as.numeric(pvalue)             # Ensure p-values are numeric
+  ) %>%
+  dplyr::filter(
+    !is.na(CHR) & !is.na(POS) & !is.na(pvalue), # Remove NAs
+    pvalue > 0 & pvalue <= 1                   # Validate p-values
+  )
+```
+
+# Save image to use in AI ilustrator (from Sjors)
+
+```{r}
+# Get top 10 most significant CpGs
+top10 <- ready.to.manh.plot %>%
+  arrange(pvalue) %>%
+  head(10)
+
+y_max <- max(-log10(ready.to.manh.plot$pvalue), na.rm = TRUE) * 0.8  # Shortens Y-axis by 20%
+
+manh.plot <- ggplot(
+  ready.to.manh.plot,
+  aes(x = POS/1e6, y = -log10(pvalue))  # Positions in Mb for cleaner scale
+) +
+  geom_point(
+    aes(color = factor(CHR %% 2)), 
+    alpha = 0.9,
+    size = 2
+  ) +
+  scale_color_manual(values = c("blue4", "orange3")) +
+# Top 10
+geom_text(
+    data = top10,
+    aes(x = POS/1e6, y = -log10(pvalue), label = SNP),
+    color = "black",
+    size = 8,
+    vjust = -0.5,
+    check_overlap = TRUE
+  ) +
+  # Facet by chromosome (scales adjust per chr)
+  facet_grid(
+    . ~ CHR,
+    scales = "free_x",
+    space = "free_x",
+    switch = "x"  # KEY: Moves strip labels to bottom
+  ) +
+
+  # Significance thresholds
+  geom_hline(
+    yintercept = -log10(0.05),
+    color = "blue",
+    linewidth = 0.8,
+  ) +
+  geom_hline(
+    yintercept = -log10(fdr.threshold),
+    color = "red",
+    linewidth = 0.8,
+    linetype = "dashed"
+  ) +
+
+  # Custom theme adjustments
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),  # Remove x-axis ticks
+    axis.line.y = element_line(linewidth = 0.8),  # Thicker Y-axis line
+    axis.ticks.y = element_line(linewidth = 0.8),  # Thicker Y-axis ticks
+    axis.title.y = element_text(size = 20, face = "bold"),
+    panel.grid = element_blank(), 
+    panel.spacing.x = unit(0, "lines"),  # No spacing between chr panels
+    legend.position = "none",  # Double-ensure no legend
+    # Chromosome labels at bottom (KEY FIX)
+    strip.placement = "outside",  # Ensures labels are outside plot area
+    strip.text.x = element_text(
+      size = 12,
+      vjust = 0,  # Positions text at the bottom of the strip
+      margin = margin(t=-1, b = 1)  # Adds space below labels
+    ),
+    strip.background = element_blank(),  # Removes gray background
+    plot.margin = margin(15, 15, 15, 15)  # Adds space around plot
+    ) +
+  labs(
+    x = "Chromosome",
+    y = expression(-log[10](italic(p)-value)),
+    color = "Chromosome"
+  )+
+  # Allow drawing elements (labels/segments) outside the plot area
+  coord_cartesian(clip = "off")#+
+  
+
+ggplot2::ggsave(
+  "manhattan_plot_sig_non_random_cpgs_top10_labels2.svg",
+  plot = manh.plot,
+  path = manh.plots.result.dir,
+  device = "svg", 
+  dpi = 600,                 
+  width = 20,
+  height = 15,     
+  units = "in"
+)
+```
+

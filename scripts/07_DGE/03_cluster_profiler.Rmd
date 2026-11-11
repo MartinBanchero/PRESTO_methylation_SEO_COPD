@@ -1,0 +1,297 @@
+---
+title: "03_cluster_profiler"
+output: html_document
+---
+
+```{r}
+result.dir <- "../../results/07_DGE/Final_results/tables/"
+top30.table <- file.path(
+  paste0(result.dir, "top30_cpgs_eqtms_gex.csv")
+)
+
+df.top30 <- read_csv(top30.table)
+df.top30
+```
+
+
+
+```{r}
+# Load packages
+
+library(RCy3)
+library(clusterProfiler)
+library(org.Hs.eg.db)  # for human gene annotation
+library(enrichplot)
+library(ReactomePA)
+
+# If you have gene names and need to convert to Entrez IDs
+gene.ids.entrez <- bitr(
+  df.top30$gene.symbol,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = org.Hs.eg.db
+)
+
+nr.map.entrez.id <- unique(gene.ids.entrez$SYMBOL)
+nr.genes.to.use <- unique(df.top30$gene.symbol)
+total.to.use <- base::intersect(nr.genes.to.use, nr.map.entrez.id)
+
+print("")
+print(
+  paste0("Total genes to use in enrichment: ", length(total.to.use))
+)
+```
+
+
+```{r}
+res.dir.functional <- "../../results/07_DGE/cluster_profiler/"
+# Create the main GO results directory
+GO.result.dir <- file.path(res.dir.functional, "functional_analysis/GO_plots") 
+dir.create(GO.result.dir, recursive = TRUE)
+
+
+# Define the vector of ontology types
+ontology_types <- c("BP", "MF", "CC")
+
+# Loop through each ontology type
+for (ont_type in ontology_types) {
+  
+  cat("Processing ontology:", ont_type, "\n")
+  
+   
+  go_enrichment <- enrichGO(
+    gene = gene.ids.entrez$ENTREZID,
+    OrgDb = org.Hs.eg.db,
+    pvalueCutoff = 0.05,  # Relaxed from 0.05
+    qvalueCutoff = 0.05,  # Relaxed from 0.05
+    keyType = "ENTREZID",
+    pAdjustMethod = "BH",  # Try Benjamini-Hochberg instead of FDR
+    ont = ont_type,
+    minGSSize = 5,       # Lower minimum gene set size
+    maxGSSize = 500      # Ensure you're not excluding small categories
+  )
+  
+  # Check if enrichment results exist
+  if (nrow(go_enrichment@result) > 0) {
+    
+    # Create the dotplot
+    p <- dotplot(go_enrichment, showCategory = 30) + 
+      theme(axis.text.y = element_text(size = 10)) +
+      ggtitle(paste("GO Enrichment -", ont_type))
+    
+    # Create filename with the ontology type
+    filename <- file.path(GO.result.dir, paste0("dotplot_GO_", ont_type, ".png"))
+    
+    # Save the plot
+    ggsave(
+      filename = filename,
+      plot = p,
+      width = 8, 
+      height = 15,
+      dpi = 300,
+      units = "in"
+    )
+    
+    cat("Saved plot for", ont_type, "to:", filename, "\n")
+    
+  } else {
+    cat("No significant enrichment found for", ont_type, "\n")
+  }
+}
+
+cat("GO enrichment analysis completed for all ontology types.\n")
+```
+
+
+
+```{r}
+# Perform KEGG pathway enrichment analysis
+kegg_enrichment <- enrichKEGG(
+  gene = gene.ids.entrez$ENTREZID,
+  keyType = 'ncbi-geneid',
+  organism = "hsa",
+  pAdjustMethod = "none",
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.1,
+  )  # "hsa" for human
+
+# View results
+head(kegg_enrichment, n=50)
+```
+
+```{r}
+KEGG.result.dir <- file.path(res.dir.functional, "functional_analysis/KEGG_plots") 
+dir.create(KEGG.result.dir, recursive=TRUE)
+
+# KEGG pathway bar plot
+p <- barplot(kegg_enrichment, showCategory = 10, title = "Top 10 KEGG Pathways")
+
+
+filename <- file.path(KEGG.result.dir, "barplot_kegg_top10cpg.png")
+ggsave(
+  filename = filename,   
+  plot = p,                               
+  width = 8, height = 10,                  
+  dpi = 300,                              
+  units = "in"                            
+)
+
+```
+
+```{r}
+REACT.result.dir <- file.path(res.dir.functional, "functional_analysis/REACTOME_plots") 
+dir.create(REACT.result.dir, recursive=TRUE)
+
+
+# Perform Reactome pathway enrichment analysis
+reactome_enrichment <- enrichPathway(
+  gene = gene.ids.entrez$ENTREZID,
+  organism = "human",
+  pAdjustMethod = "fdr",
+  qvalueCutoff = 0.1,
+  readable = TRUE
+  )
+
+# View results
+head(as.data.frame(reactome_enrichment))
+```
+
+```{r}
+# Reactome enrichment map
+p<- barplot(reactome_enrichment, showCategory = 10, title = "Top Reactome Pathways")
+
+
+# Customize the plot (reduce size of y-axis labels)
+library(ggplot2)
+customized_bar_plot <- p +
+  theme_minimal() +                                    # Change theme
+  labs(x = "Pathways", y = "-log10(Adjusted p-value)") + # Update axis labels
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Rotate x-axis labels
+    axis.text.y = element_text(size = 7),               # Reduce size of y-axis labels
+    plot.title = element_text(hjust = 0.5, face = "bold") # Center the title
+  )
+
+# View the customized plot
+print(customized_bar_plot)
+
+# Save the plot to a file
+filename <- file.path(REACT.result.dir, "barplot_REACTOME_top10.png")
+
+ggsave(filename, 
+       plot = customized_bar_plot, 
+       width = 10, height = 6, units = "in")
+```
+
+
+```{r}
+filename <- file.path(REACT.result.dir, "heatplot_REACTOME_top10_categories.png")
+png(filename, width = 10, height = 8, units = "in", res = 300)
+heatplot(reactome_enrichment, showCategory = 20, foldChange = NULL)
+dev.off()
+
+```
+```{r}
+# nominal results
+file = "../../results/05_EQTm/assoc_CpG_GEX/1Mb_window_sig_CpG_GEX/fdr_sig_cpg_sig_CpG_GEX/significant_CpG_GEX.csv"
+df.fdr <- read_csv(file, show_col_types = FALSE)
+
+# Check B cell CpGs
+bcell.cpgs <- c("cg00129232","cg08673857","cg23651812")
+
+df.bcells <- df.fdr %>%
+              dplyr::filter(CpG.id %in% bcell.cpgs)
+
+
+print(paste0("unique B cells Cpgs: ", length(unique(df.bcells$CpG.id))))
+print(paste0("Genes with significant assoc. to Bcells Cpgs: ", length(unique(df.bcells$geneID))))
+```
+
+```{r}
+res.dir <- "../../results/06_corr_CpG_celltypes/sig_corr_CpGvsCell_type_proportions/Bcells/cluster_profiler/"
+
+# Load packages
+library(clusterProfiler)
+library(org.Hs.eg.db)  # for human gene annotation
+library(enrichplot)
+library(ReactomePA)
+
+# If you have gene names and need to convert to Entrez IDs
+gene.ids.entrez <- bitr(
+  df.bcells$gene.symbol,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = org.Hs.eg.db
+)
+
+nr.map.entrez.id <- unique(gene.ids.entrez$SYMBOL)
+nr.genes.to.use <- unique(df.bcells$gene.symbol)
+total.to.use <- base::intersect(nr.genes.to.use, nr.map.entrez.id)
+
+print("")
+print(
+  paste0("Total genes to use in enrichment: ", length(total.to.use))
+)
+
+
+```
+
+## Reactome
+
+```{r}
+REACT.result.dir <- file.path(res.dir, "functional_analysis/REACTOME_plots") 
+dir.create(REACT.result.dir, recursive=TRUE)
+
+
+# Perform Reactome pathway enrichment analysis
+reactome_enrichment <- enrichPathway(
+  gene = gene.ids.entrez$ENTREZID,
+  organism = "human",
+  pAdjustMethod = "none",
+  qvalueCutoff = 1,
+  readable = TRUE
+  )
+
+# View results
+head(as.data.frame(reactome_enrichment))
+```
+```{r}
+# Reactome enrichment map
+p<- barplot(reactome_enrichment, showCategory = 10, title = "Top Reactome Pathways")
+
+
+# Customize the plot (reduce size of y-axis labels)
+library(ggplot2)
+customized_bar_plot <- p +
+  theme_minimal() +                                    # Change theme
+  labs(x = "Pathways", y = "-log10(Adjusted p-value)") + # Update axis labels
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Rotate x-axis labels
+    axis.text.y = element_text(size = 7),               # Reduce size of y-axis labels
+    plot.title = element_text(hjust = 0.5, face = "bold") # Center the title
+  )
+
+# View the customized plot
+print(customized_bar_plot)
+
+# Save the plot to a file
+filename <- file.path(REACT.result.dir, "barplot_REACTOME_top10.png")
+
+ggsave(filename, 
+       plot = customized_bar_plot, 
+       width = 10, height = 6, units = "in")
+```
+
+
+```{r}
+# Heatmap for pathway-gene associations
+filename <- file.path(REACT.result.dir, "heatplot_REACTOME_top10_categories.svg")
+svg(filename, width = 10, height = 8)
+heatplot(reactome_enrichment, showCategory = 10, foldChange = NULL)
+dev.off()
+
+filename <- file.path(REACT.result.dir, "heatplot_REACTOME_top10_categories.png")
+png(filename, width = 10, height = 8, units = "in", res = 300)
+heatplot(reactome_enrichment, showCategory = 20, foldChange = NULL)
+dev.off()
+```

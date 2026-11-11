@@ -1,0 +1,648 @@
+---
+title: "Outlier_detection"
+output: html_document
+date: "2024-10-31"
+---
+
+# Explorative data analysis
+In this markdown I explore the effect of covariates, technical and biological to have a better understanding of the sources of variation in my data. I will use the significant ones in my regression model. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(reshape2)
+library(gridExtra)
+library(tidyr)
+library(RColorBrewer)
+library(ENmix)
+library(minfi)
+```
+
+```{r}
+results.dir <- file.path("../../results/03_EDA/") 
+dir.create(results.dir, recursive=TRUE)
+```
+## Load data
+I want to use the MSet filtered by probes and samples but no normalized, since normalized data can mask some important biological signal.
+
+```{r}
+load("../../results/01_pre_process/02_sample_QC/SetObjects/sf_MSet.RData")
+
+load(
+  "../../results/01_pre_process/04_normalization/SetObjects/ENmixMSet.RData"
+)
+dim(ENmixMSet)
+
+load(
+  "../../results/01_pre_process/04_normalization/SetObjects/wtR_BMIQ_betas_norm_ftr.RData"
+)
+dim(BMIQ.betas.norm.ftr)
+
+load(
+  "../../results/01_pre_process/04_normalization/SetObjects/wtR_betas_norm_BMIQ.RData"
+)
+dim(wtR.BMIQ.betas)
+
+```
+
+# Save dir for covariates
+
+```{r}
+dir.cov <- file.path(paste0(results.dir, "covariates/"))
+dir.create(dir.cov, recursive = TRUE)
+
+```
+
+# Make a boxplot for cell proportions
+**Note** The cell proportions were obtained using cibertsortX on RNAseq samples from PRESTO.
+The signature matrix for cibersortX generated and the cell types validated using Unblender.
+
+```{r}
+# save plot
+results.dir.cov.plots <- file.path(paste0(dir.cov, "/plots/")) 
+dir.create(results.dir.cov.plots, recursive=TRUE)
+
+#df_cp_pheno_data <- as.data.frame(ENmixMSet@colData)
+df_cp_pheno_data <- read_csv("../../results/00_data_wrangling/main_table_cell_proportions_MUSIC.csv")
+
+cols <- c("SEO_COPD_Y_or_N", "T cell lineage","SM activated stress response","Innate lymphoid cell NK",
+          "Lymphatic EC mature","Monocytes","AT1",  "AT2","Fibroblasts", "EC venous",
+          "Macrophages", "Dendritic cells",  "Mast cells", "B cell lineage", "EC capillary",
+          "Myofibroblasts", "EC arterial","Multiciliated lineage","Secretory","Basal","Lymphatic EC differentiating")
+
+
+df <- df_cp_pheno_data[, cols]
+df$celltypes <- "ct"
+
+df <- df[, colSums(df) > 0]
+
+
+# Convert df to long format
+df_long <- gather(
+  df,
+  key = "celltypes",
+"T cell lineage","SM activated stress response","Innate lymphoid cell NK",
+          "Lymphatic EC mature","Monocytes","AT1",  "AT2","Fibroblasts", "EC venous",
+          "Macrophages", "Dendritic cells",  "Mast cells", "B cell lineage", "EC capillary",
+          "Myofibroblasts", "EC arterial","Multiciliated lineage","Secretory","Basal","Lymphatic EC differentiating",  -"SEO_COPD_Y_or_N", 
+  value = "props"
+)
+
+filename = paste0(results.dir.cov.plots, "cell_proportions_music.png")
+
+# Create publication-quality boxplot
+plt <- ggplot(
+    df_long,
+    aes(factor(celltypes), props, fill = factor(SEO_COPD_Y_or_N))
+  ) + 
+    geom_boxplot(outlier.size = 1, outlier.shape = 21, color = "black", alpha = 0.7) +  # Adjusted boxplot styling
+    labs(
+      title = "Box Plot of Cell Type Proportions",
+      x = "Cell Types",
+      y = "Proportion",
+      fill = "COPD Status"
+    ) +
+    scale_fill_brewer(palette = "Set2") +  # Use a color-blind-friendly palette
+    theme_bw(base_size = 16) +  # Set base font size for readability
+    theme(
+      plot.title = element_text(
+        hjust = 0.5,
+        size = 20,
+        face = "bold"
+        ),  # Center and bold title
+      axis.title.y = element_text(
+        size = 18,
+        face = "bold"
+        ),             # Larger, bold y-axis title
+      axis.text.x = element_text(
+        angle = 45,
+        hjust = 1,
+        size = 12
+        ),      # Rotate x-axis text for clarity
+      axis.text.y = element_text(size = 12),                             # Larger y-axis text
+      legend.title = element_text(size = 14, face = "bold"),             # Larger, bold legend title
+      legend.text = element_text(size = 12),                             # Larger legend text
+      legend.position = "top"                                            # Position legend on top for balance
+    ) +
+    guides(fill = guide_legend(
+      title.position = "top",
+      title.hjust = 0.5)
+      )  # Center legend title
+
+
+# Save the combined plot
+ggsave(
+    filename = filename,
+    plot = plt,
+    device = "png",
+    dpi = 300,
+    width = 6,    # Width for the combined plot
+    height = 6    # Height for the combined plot
+   )
+
+
+```
+### PCR analysis to investigate data structure
+From enmix: https://bioconductor.org/packages/devel/bioc/vignettes/ENmix/inst/doc/ENmix.html#11_Principal_component_regression_analysis_plot
+
+Define covariates to be tested
+
+```{r}
+cov <- data.frame(
+  # Biological covariates
+  group = factor(df_cp_pheno_data$Group_detailed),
+  sex = factor(df_cp_pheno_data$Gender),
+  age = as.numeric(df_cp_pheno_data$Age),
+  #BMI = as.numeric(df_cp_pheno_data$BMI),
+  #FEV1_FVC_ratio = as.numeric(df_cp_pheno_data$FEV1_FVC_ratio_best),
+  #FEV1.pred = as.numeric(df_cp_pheno_data$FEV1_percent_of_predicted_best),
+  
+  # Cell types
+  #fibro.lineage = df_cp_pheno_data$Fibroblast.lineage,
+  #AT2 = df_cp_pheno_data$AT2,
+  #smooth.muscle = df_cp_pheno_data$Smooth.muscle,
+  #alv.macro = df_cp_pheno_data$Alveolar.macrophages,
+  #EC.arterial = df_cp_pheno_data$EC.arterial,
+  #EC.venous = df_cp_pheno_data$EC.venous,
+  #dend.cells = df_cp_pheno_data$Dendritic.cells,
+  b.cell.lineage = df_cp_pheno_data$B.cell.lineage,
+  #monocytes = df_cp_pheno_data$Monocytes,
+  
+  # Technical covariates
+  # plate_nr = factor(sub(
+  #   ".*?(plate_\\d+).*",
+  #   "\\1",
+  #   gsub(
+  #     "(?i)[ _]?[Pp]late (\\d+)", "plate_\\1",
+  #     as.character(df_cp_pheno_data$Sample_Plate),
+  #     perl = TRUE)
+  # )),
+  array = factor(df_cp_pheno_data$Sentrix_ID),
+  slide = factor(df_cp_pheno_data$Sentrix_Position),
+  isoday = factor(df_cp_pheno_data$Isolation_day)
+  #sample_date = factor(df_cp_pheno_data$Sample_date) # Optionally include sample_date if needed
+)
+
+rownames(cov) <- paste0(cov$slide,"_", cov$array)
+head(cov)
+```
+
+
+# Remove samples not included in the analysis
+Im not including alfa-1 anti-trypsin, current smokers and never smokers
+
+```{r}
+pheno.data <- data.frame(ENmixMSet@colData)
+
+pheno.data2 = pheno.data %>%
+  dplyr::filter(
+    Group_detailed == "control es" | Group_detailed == "Stage II COPD" | Group_detailed == "Stage II COPD" |  Group_detailed == "Stage III COPD" | Group_detailed == "Stage IV COPD" 
+    ) 
+
+sample_keep =  which(rownames(pheno.data2) %in% base::colnames(ENmixMSet))
+pheno.data = pheno.data2[sample_keep,]
+
+idx.subjects <- match(rownames(pheno.data), base::colnames(ENmixMSet))
+MSet <- ENmixMSet[,idx.subjects]
+
+# subset raw beta matrix
+raw.betas <- ENmix::getB(sf.MSet)
+idx.subjects <- match(colnames(MSet), colnames(raw.betas))
+raw.betas <- raw.betas[,idx.subjects]
+dim(raw.betas)
+
+# subset beta matrix
+idx.subjects <- match(colnames(MSet), colnames(wtR.BMIQ.betas))
+BMIQ.betas <- wtR.BMIQ.betas[,idx.subjects]
+dim(BMIQ.betas)
+
+
+# subset covariates df
+df.covariates <- cov[colnames(raw.betas),]
+dim(df.covariates)
+
+```
+
+#Run pcr
+
+```{r}
+filename = paste0(results.dir.cov.plots, "pcrplot_covariates_raw_betas.png")
+
+png(
+  filename = filename,
+  width = 2400,
+  height = 2400,
+  res = 300
+)
+
+
+ENmix::pcrplot(raw.betas, df.covariates, npc=10)
+
+dev.off()
+```
+
+
+# Outliers detection
+**To remember:** M values larger than -+16 are very close to 0 or 1 beta values respectively, this mean that those data points are not very useful since are very likely to indicate batch effects or some other technical problems but not biology. If I look the boxplot per sample, I can see that there are some samples with extreme values (EV), thus, larger than -+16. 
+There are multiple ways to deal with this:
+- Truncate data points: For instance use -+15 as cut-off, all data points above this values are assigned  the value of the cut-off.
+- Winsorize (the one I choose).
+- Use z-score to reduce the effefct of outliers, but keeping all in.
+
+I can divide the analysis into outlier samples and outlier probes. First, I can start with outlier samples. 
+
+```{r}
+m.values <- ENmix::B2M(BMIQ.betas)
+boxplot(m.values, main = "M-value distribution across samples")
+```
+
+
+
+
+```{r}
+
+# Function to apply winsorization on EPIC array data
+winsorize_epic_array <- function(data) {
+  # Ensure the data is in a data frame format
+  data <- as.data.frame(data)
+  
+  # Apply winsorization per sample (column-wise)
+  winsorized_data <- data %>%
+    mutate(across(everything(), ~ {
+      # Calculate Q1, Q3, and IQR for the column (CpG-specific)
+      Q1 <- quantile(., 0.25, na.rm = TRUE)
+      Q3 <- quantile(., 0.75, na.rm = TRUE)
+      IQR <- Q3 - Q1
+      
+      # Define thresholds for extreme values (EVs)
+      lower_threshold <- Q1 - (2 * IQR)
+      upper_threshold <- Q3 + (2 * IQR)
+      
+      # Winsorize values: replace EVs with thresholds
+      . <- ifelse(. < lower_threshold, lower_threshold, .)
+      . <- ifelse(. > upper_threshold, upper_threshold, .)
+      
+      return(.)
+    }))
+  
+  return(winsorized_data)
+}
+```
+
+```{r}
+# Apply winsorization
+win.m.values <- winsorize_epic_array(m.values)
+boxplot(win.m.values, main = "M-value distribution across samples")
+```
+# save
+
+```{r}
+dir.plots.outliers <- file.path(paste0(results.dir, "outliers_detection/")) 
+dir.create(dir.plots.outliers, recursive=TRUE)
+
+file.mtx.mvalues <- file.path(dir.plots.outliers, "mtx_mvalues_winsor.RData")
+
+
+save(
+  win.m.values, 
+  file = file.mtx.mvalues
+  )
+```
+
+
+# Optional for clinical characteristics
+To run one-way ANOVA to find significant differences between clinical characteristics e.g
+SEO-COPD vs commonCOPD and Controls for age, sex, pack years, etc.
+
+```{r}
+df.av <- df_cp_pheno_data %>%
+                  mutate(
+                  all_groups = ifelse(
+                      Group_simple %in% c("MS-COPD", "S-COPD"), "common_COPD", 
+                      Group_simple)
+                  ) %>% na.omit()
+
+# Ensure BMI is numeric
+df.av$BMI <- as.numeric(df.av$BMI)
+df.av$Age <- as.numeric(df.av$Age)
+df.av$FEV1_FVC_ratio <- as.numeric(df.av$FEV1_FVC_ratio_best)
+df.av$FEV1.pred <- as.numeric(df.av$FEV1_percent_of_predicted_best)
+df.av$b.cells <- as.numeric(df.av$B.cell.lineage)
+
+# Function to calculate p-values for ANOVA
+anova_pvalue <- function(column, group_col) {
+  if (is.numeric(df.av[[column]])) {
+    model <- aov(df.av[[column]] ~ df.av[[group_col]])
+    summary(model)[[1]][["Pr(>F)"]][1]
+  } else {
+    NA
+  }
+}
+
+# Run ANOVA for numeric columns
+numeric_columns <- c("Age", "BMI", "FEV1_FVC_ratio", "FEV1.pred", "b.cells")
+p_values <- sapply(numeric_columns, anova_pvalue, group_col = "all_groups")
+
+# Create a dataframe of p-values
+pval_df <- data.frame(
+  Variable = numeric_columns,
+  p_value = p_values
+)
+
+# Add threshold categories
+pval_df$Threshold <- cut(
+  pval_df$p_value,
+  breaks = c(0, 0.01, 0.05, 0.1, 1),
+  labels = c("<0.01", "<0.05", "<0.1", ">=0.1"),
+  include.lowest = TRUE
+)
+
+# Prepare data for heatmap
+heatmap_data <- dcast(pval_df, Variable ~ Threshold, value.var = "p_value", fill = 1)
+
+# Visualization using heatmap
+heatmap(
+  as.matrix(heatmap_data[, -1]),  # Exclude the variable column
+  main = "P-value Heatmap for ANOVA",
+  color = colorRampPalette(c("red", "yellow", "green"))(50)
+)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+library(ggplot2)
+dir.plots.outliers <- file.path(paste0(results.dir, "outliers_detection/plots/")) 
+dir.create(dir.plots.outliers, recursive=TRUE)
+
+# Load your data
+tBMIQ.betas <- t(BMIQ.betas) # Run on samples
+
+# Run PCA
+pca.results <- prcomp(tBMIQ.betas, scale. = TRUE)
+exp.var <- pca.results$sdev^2 / sum(pca.results$sdev^2)
+cum.var <- cumsum(exp.var)
+
+# Combine proportion and cumulative variance into a data frame
+exp.var <- data.frame(
+  PC = seq_along(exp.var),
+  Proportion = exp.var,
+  Cumulative = cumsum(exp.var)
+)
+
+
+filename <- file.path(dir.plots.outliers, "elbow_plot.png")
+
+# Elbow plot
+elbow_plot <- ggplot(exp.var[exp.var$PC < 11,]
+, aes(x = PC, y = Proportion)) +
+  geom_point(size = 4, color = "blue") + # Larger points for emphasis
+  geom_line(group = 1, color = "blue", size = 1) + # Thicker line for visibility
+  theme_classic() + # Cleaner, professional theme
+  labs(
+    title = "Elbow Plot: Variance Explained by Principal Components",
+    x = "Principal Component (PC)",
+    y = "Proportion of Variance Explained"
+  ) +
+  scale_x_continuous(breaks = exp.var$PC) + # Ensure all PCs are shown
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5), # Center title
+    axis.title = element_text(size = 14, face = "bold"), # Bold axis titles
+    axis.text = element_text(size = 12), # Readable axis labels
+    #panel.grid.major = element_line(color = "gray", linetype = "dashed"), # Light grid lines
+    panel.grid.minor = element_blank() # Remove minor grid lines
+  )
+
+# Display the plot
+print(elbow_plot)
+
+# Save the plot for publication
+ggsave(
+  filename = filename, # File name
+  plot = elbow_plot,           # Plot to save
+  dpi = 300,                   # High resolution
+  width = 8, height = 6,       # Dimensions in inches
+  units = "in"                 # Units for width and height
+)
+```
+
+# Hierarchical clustering on PC embedding
+
+```{r}
+pca_data <- as.data.frame(pca.results$x[,1:2]) 
+# Compute the distance matrix on the PCA-transformed data
+dist_matrix <- dist(pca_data, method = "euclidean")
+
+# Perform hierarchical clustering using the "complete" linkage method
+hc <- hclust(dist_matrix, method = "complete")
+
+png(file.path(dir.plots.outliers, "dendogram_pca_outliers.png"))
+# Plot the dendrogram
+plot(hc,
+     main = "Hierarchical Clustering on PCA",
+     xlab = "Samples",
+     ylab = "Height",
+     labels=FALSE
+     )
+
+clusters <- cutree(hc, k = 5)
+pca_data$clusters <- as.factor(clusters)
+
+#sample.scores <- pca.results$x[, 1:20]
+pheno.data <- data.frame(ENmixMSet@colData)
+pheno.data2 <- merge(pheno.data, pca_data, by = "row.names")
+rownames(pheno.data2) <- pheno.data2$Row.names
+
+# draw dendogram with red borders around the 5 clusters 
+rect.hclust(hc, k=5, border="red")
+dev.off()
+
+```
+
+```{r}
+library(ggplot2)
+library(reshape2)
+
+# Example to.color list
+to.color <- c("clusters", "Group_detailed", "Gender")
+
+# Melt the pheno.data2 to long format for faceting
+pheno.data2_long <- reshape2::melt(
+  pheno.data2,
+  id.vars = c("PC1", "PC2"), # Variables used in PCA plot
+  measure.vars = to.color,  # Variables to color by
+  variable.name = "Coloring_Variable",
+  value.name = "Coloring_Value"
+)
+
+# PCA plot with facets
+plt <- ggplot(pheno.data2_long, aes(x = PC1, y = PC2, color = Coloring_Value)) +
+  geom_point(size = 4) +
+  facet_wrap(~ Coloring_Variable, scales = "free", ncol = 2) + # Subplots for each variable
+  labs(
+    title = "PCA Colored by Different Variables",
+    x = "PC1",
+    y = "PC2"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+    axis.text = element_text(size = 14),
+    axis.title = element_text(size = 16, face = "bold"),
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 14, face = "bold"), # Facet titles
+    legend.position = "bottom"
+  )
+
+# Save the plot
+filename <- file.path(dir.plots.outliers, "PCA_with_multiple_colorings.png")
+ggsave(
+  filename = filename,
+  plot = plt,
+  width = 14,  # Increased width for multiple facets
+  height = 10,
+  dpi = 300
+)
+```
+
+```{r}
+#raw.betas <- getBeta(ENmixMSet)
+df.sample.outlier<- wateRmelon::outlyx(
+                                  ENmixMSet,
+                                  iqr=TRUE,
+                                  iqrP=4,
+                                  pc=10,
+                                  mv=TRUE,
+                                  mvP=0.15,
+                                  plot=TRUE)
+
+```
+
+
+Conclusion:
+It seems that there is no samples outliers, however I have quite a lot of noise, PC1 explain 12% of the variance. 
+
+
+## Probe outliers detection
+Check variance distribution, one way is to get e.g top 50000 most variable probes, run PCA. 
+
+```{r}
+cpg_variances <- apply(BMIQ.betas, 1, var)
+
+# Step 2: Order the CpG sites by variance in descending order
+sorted_indices <- order(cpg_variances, decreasing = TRUE)
+
+# Step 3: Reorder the methylation data matrix based on sorted indices
+BMIQ.betas.sorted <- BMIQ.betas[sorted_indices, ]
+
+# Optional: Add variance values as an additional column for reference
+betas.val.sorted <- cbind(BMIQ.betas.sorted,
+                            Variance = cpg_variances[sorted_indices]
+                            )
+
+betas <- betas.val.sorted[, -ncol(betas.val.sorted)]
+
+# View the top rows of the sorted data
+head(betas)
+
+```
+
+### Detect outliers
+
+```{r}
+pca <- prcomp(
+  betas[1:100000,],
+  center = TRUE,
+  scale = TRUE
+)
+
+pca_data <- as.data.frame(pca$x[,1:2]) 
+
+
+#sample.scores <- pca.results$x[, 1:20]
+pheno.data <- data.frame(ENmixMSet@colData)
+pheno.data2 <- merge(pheno.data, pca_data, by = "row.names")
+rownames(pheno.data2) <- pheno.data2$Row.names
+
+
+d <- data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2])
+d
+```
+
+
+```{r}
+# CpGs
+hvCpGs <- betas[1:100000,]
+
+Q1.Q3 <- apply(hvCpGs, 1 , function(x) quantile(x, probs=c(0.25,0.75), na.rm=TRUE))
+IQR.value <- Q1.Q3["75%",] - Q1.Q3["25%",]
+lower.fence <- Q1.Q3["25%",] - 3*IQR.value
+upper.fence <- Q1.Q3["75%",] + 3*IQR.value
+
+flag <- hvCpGs < lower.fence | hvCpGs > upper.fence 
+hvCpGs[flag] <- NA
+
+# CpGs with more than 5% missing values 
+rows.na <- rowSums(is.na(hvCpGs)/ncol(hvCpGs))
+outliers <- hvCpGs[rows.na > 0.05,]
+cpgs <- rownames(outliers)
+
+length(cpgs)
+```
+
+```{r}
+d$outliers <- ifelse(rownames(d) %in% cpgs, "highlight", "default")
+
+ggplot(d, aes(x = PC1, y = PC2, color = outliers)) +
+   geom_point(size = 1) +
+   labs(
+     title = "PCA top100000 highest variance",
+     x = "PC1",
+     y = "PC2"
+   ) +
+   scale_color_manual(
+     values = c("highlight" = "red", "default" = "grey")  # Define custom colors
+   ) +
+   theme_bw() +
+   theme(
+     plot.title = element_text(hjust = 0.5),
+     axis.text = element_text(size = 18),
+     legend.text = element_text(size = 16)
+   )
+
+```
+
+Conclusion
+I dont remove the CpGs flag as outliers

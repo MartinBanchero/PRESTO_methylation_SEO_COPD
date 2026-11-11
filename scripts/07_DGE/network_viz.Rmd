@@ -1,0 +1,171 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-02-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# load packages
+
+```{r}
+library(tidyverse)
+library(ggraph)
+library(tidygraph)
+library(igraph)
+library(ggplot2)
+```
+
+# Load the data
+
+```{r}
+file <- "../../results/main_table_cpgs_eqtms_gex.csv"
+df.main.table <- read_csv(file)
+
+df.top30.eqtms <- df.main.table %>%
+            arrange(adj.P.Val.cpg) %>%
+            slice(1:30)
+
+
+
+df.eqtms <- df.main.table %>%
+  filter(!is.na(gene.symbol)) %>%  # Remove rows where gene.symbol is NA
+  arrange(adj.P.Val.cpg) 
+
+df <- df.eqtms %>%
+        filter(sig.GEX.genes == "TRUE")
+  
+```
+
+
+```{r}
+unique(df$gene.symbol)
+```
+
+```{r}
+result.dir.plots <- "../../results/05_EQTm/assoc_CpG_GEX/plots_viz/"
+dir.create(result.dir.plots, recursive = TRUE)
+
+```
+
+```{r}
+
+df.top30.eqtms <- df
+# Create edges data frame - ensure all CpGs have edges to their genes
+edges <- df.top30.eqtms %>%
+  select(from = CpG.id, to = gene.symbol, weight = logFC.eqtm) %>%
+  filter(!is.na(to) & to != "" & !is.na(from))  # Remove any missing values
+
+# Create nodes data frame
+all_cpgs <- unique(df.top30.eqtms$CpG.id)
+all_genes <- unique(na.omit(df.top30.eqtms$gene.symbol[df.top30.eqtms$gene.symbol != ""]))
+
+nodes <- data.frame(
+  id = c(all_cpgs, all_genes),
+  type = c(rep("CpG", length(all_cpgs)), rep("Gene", length(all_genes)))
+)
+
+# Create a graph object
+graph <- tbl_graph(nodes = nodes, edges = edges, directed = TRUE) %>%
+  activate(edges) %>%
+  mutate(abs_weight = abs(weight))
+
+# Plot the graph
+plot <- ggraph(graph, layout = "fr", weights = abs_weight) +
+  geom_edge_link(
+    aes(width = abs(weight), 
+        color = ifelse(weight > 0, "Positive", "Negative")),
+    alpha = 0.7
+  ) +
+  geom_node_point(aes(color = type), size = 3) +
+  geom_node_text(aes(label = id), repel = TRUE, size = 3, max.overlaps = 20) +
+  scale_edge_width(range = c(0.5, 2), name = "|logFC|") +
+  scale_edge_color_manual(
+    values = c("Positive" = "blue", "Negative" = "red"),
+    name = "logFC Direction"
+  ) +
+  scale_color_manual(
+    values = c("CpG" = "darkgreen", "Gene" = "purple"),
+    name = "Node Type"
+  ) +
+  theme_void() +
+  theme(
+    plot.margin = margin(0.5, 0.5, 0.5, 0.5, "in"),
+    legend.position = "right"
+  ) +
+  labs(
+    title = "CpGs and Regulated Genes",
+    #subtitle = "Blue edges: logFC > 0, Red edges: logFC < 0"
+  )
+
+print(plot)
+
+# Save the plot to a file with high quality (300 dpi)
+ggsave(
+  filename =  file.path(result.dir.plots, "top30_eqtm_genes_cpgs_graph_plot.png"),
+  plot,
+  width = 10,
+  height = 8,
+  dpi = 300,
+  units = "in",
+  bg = "white", 
+  #device = "png"
+  device = "png"
+  )
+```
+
+```{r}
+# Create nodes and edges data frames
+edges <- data.frame(
+  from = df.meth.status$CpG.id,  # CpG IDs
+  to = df.meth.status$gene.symbol, # Gene IDs
+  weight = df.meth.status$logFC         # Edge weights (e.g., correlation or significance)
+)
+
+id = c(unique(df.meth.status$CpG.id), df.meth.status$gene.symbol)
+type = ifelse(grepl("cg", id), "CpG", "Gene")
+
+nodes <- data.frame(
+  id = id,
+  type = type
+)
+nodes
+```
+
+
+```{r}
+# Create a graph object
+graph <- tbl_graph(nodes = nodes, edges = edges, directed = TRUE) %>%
+  activate(edges) %>%
+  mutate(abs_weight = abs(weight)) 
+
+# Plot the graph
+plot <- ggraph(graph, layout = "fr", weights = abs_weight) +  # Use absolute weights for layout
+  geom_edge_link(aes(width = abs(weight), color = weight > 0), alpha = 0.6) +  # Color by weight sign
+  geom_node_point(aes(color = type), size = 2) +  # Nodes colored by type
+  geom_node_text(aes(label = id), repel = TRUE, size = 3) +  # Node labels
+  scale_edge_width(range = c(0.5, 2)) +  # Adjust edge width range
+  scale_edge_color_manual(values = c("TRUE" = "blue", "FALSE" = "red")) +  # Set edge colors
+  theme_void() +  # Clean theme
+  theme(
+    plot.margin = margin(0.5, 0.5, 0.5, 0.5, "in"),  # Margin adjustments
+    legend.position = "none"  # Remove edge color legend
+  ) +
+  labs(title = "hypo-methylated CpGs and Regulated Genes")
+
+print(plot)
+
+# Save the plot to a file with high quality (300 dpi)
+ggsave(
+  filename =  file.path(hypo.result.dir, "hypo_methylation_plot_fc02.png"),
+  plot,
+  width = 10,
+  height = 8,
+  dpi = 300,
+  units = "in",
+  bg = "white", 
+  device = "png")
+
+```

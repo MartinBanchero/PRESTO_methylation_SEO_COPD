@@ -1,0 +1,568 @@
+---
+title: "5b_dm_analysis"
+author: "Martin"
+date: "2024-04-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE}
+library(conflicted)
+library("missMethyl") # Contain annot850K
+library(qqman)
+library(ggprism)
+library(tidyverse)
+library(dplyr)
+library(minfi)
+library(ENmix)
+```
+
+```{r}
+dir.results <- file.path("../../../results/04_DM/04b_DM_COPDcommon_vs_nonCOPD/") 
+dir.create(dir.results, recursive=TRUE)
+```
+
+
+## Introduction
+Once I obtained the DMPs from SEO-COPD vs Ctrl ex-smokers I want to use this ones as input for the regression of cCOPD. The rationale here is that the DMPS obtained (considering nominal p-value) should be specific for cCOPD and not to SEO-COPD only. 
+**Note: I run the cCOPD model with all the cpgs and after permutation ~400 DMPs remained, I checked those in SEO-COPD DMPS, all of the 400 cCOPD DMPs where in the DMPs from SEO-COPD**. 
+
+### Load data neede for DM
+
+```{r}
+load(
+  "../../../results/01_pre_process/04_normalization/SetObjects/ENmixMSet_norm.RData"
+)
+dim(ENmixMSet.norm)
+
+load(
+  "../../../results/01_pre_process/04_normalization/SetObjects/wtR_BMIQ_betas_norm_ftr.RData"
+)
+dim(BMIQ.betas.norm.ftr)
+
+
+df.sva <-read.csv(
+  "../../../results/02_PCA_ctrl_probes/ENmix_sva_all_donors.csv",
+  row.names = 1
+)
+
+df.sva
+```
+
+
+# Add PC surrogates and subset to samples to us in regression
+
+```{r}
+pheno.data <- data.frame(ENmixMSet.norm@colData)
+pheno.data2 <- merge(pheno.data, df.sva, by = "row.names")
+rownames(pheno.data2) <- pheno.data2$Row.names
+
+# commonCOPD vs non_COPD
+pheno.data = pheno.data2 %>%
+  dplyr::filter(
+    (Group_detailed == "control es" | Group_simple == "MS-COPD")
+    )%>%
+  dplyr::mutate(
+   com_COPD_Y_or_N = as.factor(
+      dplyr::case_when(
+      COPD_Y_or_N == "Control" ~ "Control_ES",
+      COPD_Y_or_N =="COPD" ~ "common_COPD"
+     )
+    ) 
+  )%>%
+  readr::write_csv(
+    .,
+    file = file.path(dir.results, "pheno.data_comCOPDvsCtrl_ES.csv")
+    )
+
+pheno.data
+```
+
+
+## Check final input dataset
+18 commonCOPD and 13 controls (ES)
+
+```{r}
+df2 <- pheno.data %>% 
+          group_by(
+            Group_detailed, Group_simple
+            ) %>% 
+          summarise(
+            total_count=n(),
+            .groups = 'drop'
+            )%>% 
+  as.data.frame()
+
+df2
+```
+
+
+```{r}
+# Stacked
+ggplot(
+  data = df2,
+  aes(fill = Group_simple, y = total_count, x =Group_detailed )
+  ) +
+  geom_bar(position="stack", stat="identity") +
+  theme(
+    axis.text.x = element_text(
+      angle = 90,
+      vjust = 0.5,
+      hjust=1
+      ),
+    panel.background = element_blank(),
+    text = element_text(size = 15, face= "bold")
+    )
+
+```
+
+```{r}
+# Create the histogram
+# Create the density plot
+ggplot(pheno.data, aes(x = Age, color = Group_simple, fill = Group_simple)) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = c("Control" = "blue", "SEO-COPD" = "red")) +
+  scale_color_manual(values = c("Control" = "blue", "SEO-COPD" = "red")) +
+  labs(title = "Age Distribution by Group",
+       x = "Age",
+       y = "Density") +
+  theme_minimal()
+```
+
+### Approach 1
+Use the 4344 CpGs that where significant in SEO_COPD vs Ctrl contrast to reduce high-dimensional burden.
+
+```{r eval=TRUE}
+# load results from SEO-COPD vs ctrl
+df.results.SEO <- read.csv(
+  "../../../results/04_DM/final_sign_cpgs_SEO_results_win.csv"
+  )
+
+# %>%
+#   dplyr::filter(P.Value.emp < 0.05)
+# dim(df.results.SEO)
+
+#cpg <- unique(df.results.SEO$CpG.id)
+#length(cpg)
+
+#cpg.keep <- match(cpg, rownames(BMIQ.betas.norm.ftr))
+#length(cpg.keep)
+
+#BMIQ.betas <- BMIQ.betas.norm.ftr[cpg.keep, ]
+#dim(BMIQ.betas)
+
+BMIQ.betas <- BMIQ.betas.norm.ftr
+m.values = ENmix::B2M(BMIQ.betas)
+dim(m.values)
+
+# Remove sample from pheno.data that was removed by ENmix
+sample_keep =  which(rownames(pheno.data) %in% base::colnames(m.values))
+pheno.data = pheno.data[sample_keep,]
+
+idx.subjects <- match(rownames(pheno.data), base::colnames(m.values))
+m.values <- m.values[,idx.subjects]
+dim(m.values)
+```
+
+```{r}
+boxplot.color.group <- function(pheno.data, m.value){
+      groups <- as.factor(pheno.data$com_COPD_Y_or_N)
+      # Assign a unique color to each group level
+      # Sort the data by groups to ensure grouping
+      sorted.indices <- order(groups)  # Get the order of the samples by group
+      sort.m.values <- m.value[, sorted.indices]  # Rearrange the data columns
+      groups <- groups[sorted.indices]  # Rearrange the grouping factor
+      
+      group.colors <- rainbow(length(levels(groups)))  # Or use custom colors
+      names(group.colors) <- levels(groups) 
+      # Create the boxplot with grouping
+      boxplot(sort.m.values,
+              main = "M-value distribution across samples",
+              col = group.colors[groups],
+              xlab = "Samples grouped by levels",
+              las = 2)  # Rotate axis labels for readability
+      
+      # Add group separation lines (optional)
+      abline(v = cumsum(table(groups)) + 0.5, col = "blue",  lty = 3, lwd = 3)
+}
+
+boxplot.color.group(pheno.data = pheno.data, m.value = m.values)
+```
+
+# Winsorization per sample
+
+```{r}
+# Function to apply winsorization on EPIC array data
+winsorize.epic.array <- function(data) {
+  # Ensure the data is in a data frame format
+  data <- as.data.frame(data)
+  
+  # Apply winsorization per sample (column-wise)
+  winsorized.data <- data %>%
+    mutate(across(everything(), ~ {
+      # Calculate Q1, Q3, and IQR for the column (CpG-specific)
+      Q1 <- quantile(., 0.25, na.rm = TRUE)
+      Q3 <- quantile(., 0.75, na.rm = TRUE)
+      IQR <- Q3 - Q1
+      
+      # Define thresholds for extreme values (EVs)
+      lower.threshold <- Q1 - (1.5 * IQR) # I use 1.5 times from IQR, more stringent.
+      upper.threshold <- Q3 + (1.5 * IQR)
+      
+      # Winsorize values: replace EVs with thresholds
+      . <- ifelse(. < lower.threshold, lower.threshold, .)
+      . <- ifelse(. > upper.threshold, upper.threshold, .)
+      
+      return(.)
+    }))
+  
+  return(as.matrix(winsorized.data))
+}
+```
+
+```{r}
+# Apply winsorization
+win.samples.m.values <- winsorize.epic.array(m.values)
+boxplot.color.group(pheno.data = pheno.data, m.value = win.samples.m.values)
+```
+
+```{r}
+# Save
+save(
+  win.samples.m.values, 
+  file = "../../../results/04_DM/04b_DM_COPDcommon_vs_nonCOPD/models/model_age_gender_PC1_7/win_norm_mvalues.RData"
+  )
+```
+
+
+```{r}
+hist(win.samples.m.values, xlab = "M-value")
+```
+
+```{r}
+pheno.data$Gender <- as.factor(pheno.data$Gender)
+pheno.data$Age <- as.numeric(pheno.data$Age)
+```
+
+# TODO: Try quantile regression, by comparing median, instead of mean.
+
+
+### Run the regression model
+- Check adding cell proportion, check if improve lambda.
+- Use bacon package.
+
+```{r warning=FALSE, message=True}
+start.time <- Sys.time()
+
+design <- model.matrix(
+  ~0 + com_COPD_Y_or_N + Gender + Age + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 +PC7,
+  data = pheno.data
+)
+
+original.fit <- limma::lmFit(
+  win.samples.m.values,
+  design,
+  na.exclude=TRUE,
+  method = "robust",# to handle outliers
+  maxit = 1000
+)
+elapsed.time <- Sys.time() - start.time
+print(elapsed.time)
+```
+
+```{r}
+#file.orig.fit <- file.path(results.dir, "limma_original_fit_age_gender_PC1_7.RDS")
+#saveRDS(original.fit, 
+#        file = file.orig.fit)
+
+#ori.fit <- readRDS(
+#  file.orig.fit
+#  )
+```
+
+
+```{r}
+# create a contrast matrix for specific comparisons
+cont.matrix <- limma::makeContrasts(
+  test = com_COPD_Y_or_Ncommon_COPD - com_COPD_Y_or_NControl_ES ,
+  levels = design
+)
+
+# Fit the contrasts
+adjusted.fit <- limma::contrasts.fit(original.fit, cont.matrix)
+
+# Calculate the moderate t-statistics that uses pooling
+adjusted.fit <- limma::eBayes(adjusted.fit, 0.05) 
+summary(limma::decideTests(adjusted.fit))
+```
+
+
+## Save limma object with fit results
+
+```{r, eval=FALSE}
+dir.results.DMPS.cCOPD <- file.path(dir.results, "DMPs_cCOPD/")
+dir.create(dir.results.DMPS.cCOPD, recursive = TRUE)
+
+saveRDS(adjusted.fit, 
+        file = file.path(
+          dir.results.DMPS.cCOPD,
+          "cCOPD_limma_adjusted_fit.RDS"
+  )
+)
+```
+
+
+```{r}
+#adjusted.fit <- readRDS(
+#  file = file.path(dir.results.DMPS.cCOPD,"limma_adjusted_fit.RDS")
+#  )
+```
+
+# Evaluate results
+
+```{r}
+# Get table of resulst from contrast 
+DMPs <- limma::topTable(
+  adjusted.fit,
+  adjust = "BH",
+  coef = "test",
+  sort.by = "B",
+  number = Inf
+)
+
+rownames(DMPs) <- rownames(m.values)# Check this step, sanity check in case of shuffling cpg ids
+
+nr_dm <- apply(DMPs, 2, function(x) {sum(abs(x))})[10]
+summary(DMPs)
+```
+
+```{r}
+hist(DMPs$`P.Value`, breaks=50)
+```
+
+### Annotate results
+
+```{r}
+results <- DMPs %>%
+  tibble::rownames_to_column("CpG.id") %>%
+  dplyr::left_join(
+    y = minfi::getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19) %>%
+      as.data.frame() %>%
+      dplyr::select(
+        Name,
+        chr,
+        pos
+      ),
+    by = c("CpG.id" = "Name")
+  )
+
+head(results)
+```
+## Save significants for nominal pvalue < 0.05
+
+```{r}
+df.DMPs.sig <- results %>%
+  dplyr::filter(P.Value < 0.05)
+
+file.adj.fit <- file.path(
+                    dir.results.DMPS.cCOPD,
+                    "cCOPD_limma_top_table_age_gender_PC1_PC7.csv"
+                    )
+
+# save annotated results from limma
+write_csv(df.DMPs.sig, 
+        file = file.adj.fit)
+```
+
+
+# Plot volcano 
+
+```{r}
+# Load required libraries
+library(EnhancedVolcano)
+
+EnhancedVolcano(
+  results,
+  lab = results$CpG.id,                # Labels (CpG names)
+  x = 'logFC',                         # log fold-change
+  y = 'P.Value',                       # p-value
+  pCutoff = 0.05,                      # p-value cutoff
+  FCcutoff = 0,                        # Fold-change cutoff (log2)
+  colAlpha = 0.8,                      # Transparency
+  title = "Volcano Plot of CpG Sites",
+  subtitle = "Highlighting top 10 CpGs by adjusted p-value",
+  legendPosition = "right",
+  legendLabSize = 12,
+  legendIconSize = 4.0
+)
+
+```
+
+## Estimate Inflation
+Genomic inflation factor
+zscore = (x-μ)/σ
+
+```{r}
+effect.size = adjusted.fit$coefficients
+stdError = sqrt(adjusted.fit$s2.post) * adjusted.fit$stdev.unscaled
+
+zvalue <- effect.size / stdError
+chisq  <- (zvalue) ^ 2
+
+lambda_infl <- median(
+  chisq,
+  ) / qchisq(p = 0.5, df =  1)
+
+print(paste0("lamda using effect size and SE: ", round(lambda_infl, 3)))
+```
+
+```{r}
+dir.inflation = file.path(dir.results.DMPS.cCOPD, "/plots/test_inflation")
+dir.create(dir.inflation, recursive = TRUE)
+
+all_p_values <- results$P.Value
+# Sort p-values in ascending order
+sorted_p_values <- sort(all_p_values)
+# Calculate expected quantiles under the null hypothesis (uniform distribution)
+expected_quantiles <- qunif((1:length(sorted_p_values))/(length(sorted_p_values) + 1))
+
+
+file.qq <- file.path(dir.inflation, "qq-plot.png")
+png(filename = file.qq)
+
+# Plot Q-Q plot
+plot(-log10(expected_quantiles),
+     -log10(sorted_p_values), 
+     xlab = expression("Expected -log10 (p-values)"), 
+     ylab = expression("Observed -log10 (p-values)"),
+     main = paste0(
+       "Q-Q Plot of p-values without lambda correction (lambda = ", round(lambda_infl, 3),")"),
+     pch = 20
+     )
+abline(0, 1, col = "red")  # Add a line for reference
+
+# Add a legend
+legend("topleft", legend = "Expected Distribution", col = "red", lty = 1, pch = 20)
+
+dev.off()
+```
+
+
+```{r}
+explore_regression_results <- function(DMPs){
+  # Explore the data
+  print(paste0("Total significant probes: ", dim(DMPs[DMPs$P.Val < 0.05,])[1])) 
+  # 0 < LogFC
+  print(
+    paste0(
+      "Significant probes with positive LogFC: ",
+      dim(DMPs[DMPs$P.Val < 0.05 & DMPs$logFC > 0,])[1]
+      )
+    )
+  # 0> LogFC
+  print(paste0(
+    "Significant probes with negative logFC: ",
+    dim(DMPs[DMPs$adj.P.Val < 0.05 & DMPs$logFC < 0,])[1]
+    )
+  ) 
+  print(paste0(
+    "lamda:  ",
+    round(lambda_infl, 3)
+   )
+  )
+}
+explore_regression_results(res.filt)
+```
+
+```{r}
+#m.values = ENmix::B2M(BMIQ.betas)
+
+source("../../utils/plotting_functions.R")
+
+dir.boxplots <- file.path(dir.results.DMPS.cCOPD, "plots/boxplots/")
+dir.create(dir.boxplots, recursive = TRUE)
+
+file.top = file.path(dir.boxplots, "top9_most_significants_cpgs_mvalues.png")
+png(
+  filename = file.top,
+  width = 2400,
+  height = 2400,
+  res = 300
+)
+
+top_sites <- results[c(1:9),]$CpG.id
+boxplots.top.cpgs(top_sites, m.values, pheno.data$com_COPD_Y_or_N)
+
+dev.off()
+```
+
+```{r}
+dir.swarm.plot <- file.path(dir.results.DMPS.cCOPD, "/plots/swarmplots/")
+dir.create(dir.swarm.plot, recursive = TRUE)
+
+file.path <- file.path(
+  paste0(dir.swarm.plot, "top9_most_significants_cpgs_swarm_mvalues.png")
+)
+
+png(
+  filename = file.path,
+  width = 2400,
+  height = 2400,
+  res = 300
+)
+grid.swarm.nocolor.plot(
+  top_sites = top_sites,
+  m.values = m.values,
+  pheno = pheno.data$com_COPD_Y_or_N
+  )
+
+dev.off()
+```
+
+
+```{r }
+# Load necessary libraries
+library(ggplot2)
+library(gridExtra)
+
+file.path <- file.path(
+  paste0(dir.swarm.plot, "top9_most_significants_cpgs_swarm_color_mvalues.png")
+)
+
+grid.swarm.color.plot(
+  top_sites = top_sites,
+  m.values = m.values,
+  pheno.data = pheno.data,
+  pheno.color.var = pheno.data$com_COPD_Y_or_N,
+  filename = file.path
+)
+dev.off()
+```
+
+# Run permutation test in cluster, use script run_permutation_cluster.R
+
+
+
+### Power analysis paper:
+https://pubmed.ncbi.nlm.nih.gov/31088362/Pilayfastqs
+"The recommended significance threshold for DNA methylation association analyses is P < 9.42x10-8 as determined from a permutation analysis."
+
+```{r}
+# genome-wide sig cpgs
+sig <- ifelse(DMPs$`P.Value` < 9e-8, 1, 0)
+table(sig)  # 1 sig
+```
+
+
+```{r}
+cCOPD <- unique(df.DMPs.sig$CpG.id)
+length(cCOPD)
+
+SEO <- unique(df.results.SEO$CpG.id)
+length(SEO)
+
+length(base::intersect(SEO, cCOPD))
+```

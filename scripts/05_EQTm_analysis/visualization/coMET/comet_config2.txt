@@ -1,0 +1,23 @@
+disp.mydata=TRUE
+mydata.format=site
+cormatrix.format=cormatrix
+cormatrix.method=pearson
+sample.labels=CpG
+symbols=circle-fill
+lab.Y=log
+disp.color.ref=TRUE
+disp.association=FALSE 
+disp.region=TRUE  # CRITICAL FOR SHOWING GENES
+disp.association.large=TRUE
+color.list.large=green
+symbols.large=diamond-fill
+disp.cormatrixmap=TRUE
+cormatrix.color.scheme=bluewhitered
+disp.color.bar=TRUE
+print.image=FALSE
+disp.mult.lab.X=FALSE
+genome=hg19  # MUST MATCH YOUR DATA
+dataset.geneE=hsapiens_gene_ensembl
+verbose=TRUE
+list.tracks=geneENSEMBL:collapseTranscripts=meta;showId=TRUE;transcriptAnnotation='symbol'  # KEY FOR GENE DISPLAY
+

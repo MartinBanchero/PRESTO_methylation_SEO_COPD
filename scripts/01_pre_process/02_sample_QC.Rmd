@@ -1,0 +1,215 @@
+---
+title: "02_Sample_QC"
+author: "Martin"
+date: "2024-03-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, dev = "CairoPNG")
+```
+
+## Introduction
+## Qc metrics for sample quality check
+- Plot log median (met) vs log median(un-met).
+- Detection p-value for every CpG site in all samples.
+- Overall distributions of Beta values for each sample.
+- Check internal control probes:
+  - hybridization
+  - bisulfite conversion
+  - staining control
+  - extension control
+  
+### Load packages
+```{r warning=FALSE, message=FALSE}
+library(minfi)
+library(tidyverse)
+```
+
+### Load prepared data
+
+```{r message=FALSE}
+load("../../results/00_data_wrangling/setObjects/rgSet_ext.RData")
+load("../../results/00_data_wrangling/setObjects/MSet.RData")
+load("../../results/00_data_wrangling/setObjects/grSet.RData")
+```
+
+
+## Set output dir for plots
+
+```{r}
+out.dir.sampleQC = "../../results/01_pre_process/02_sample_QC/"
+out.dir.sampleQC.plots <- file.path(out.dir.sampleQC, "plots")
+```
+
+### Plot log median (met) vs log median(un-met)
+Visual inspection of all samples. It is expected to see in the median plot good samples clustering together and the bad QC samples separating from the good quality samples due to lower median values.
+
+To retrieve QC information from MSet object is used getQC() and plotQC() for visualization. 
+
+**Note** The threshold to decide which samples are good or bad is totally arbitrary and might change depending on the dataset.
+
+```{r}
+png(file.path(out.dir.sampleQC.plots, "plot_log_median.png"))
+qc <- getQC(MSet)
+plotQC(qc )
+dev.off()
+```
+
+### Mean detection p-values
+Look at the detection p-values for all CpG sites across all samples to identify any failed samples. 
+Samples with multiple failed samples have relatively large p-values.
+
+```{r, include=FALSE}
+detP = detectionP(rgSet_ext)
+```
+
+```{r include=FALSE}
+library(reshape2)
+df_man = melt(detP, varnames = c("CpGID","sample"), value.name ="pvalue" )
+head(df_man)
+```
+
+
+```{r}
+png(file.path(out.dir.sampleQC.plots, "barplot_detection_pvalue.png"))
+barplot(
+  colMeans(detP),
+  las=2,
+  cex.names=1,
+  ylab="Mean detection p-values"
+)
+abline(h=0.05,col="red")
+dev.off()
+```
+
+### Overall distributions of Beta values for each sample
+Here we expect beta values presenting values close to zero or one. This is an indication of unmethylatilated CpG sites when close to zero and methylated when close to one.
+
+```{r}
+phenoData <- pData(MSet)
+phenoData$sampleID <- colnames(MSet)
+
+library(Polychrome)
+# I want a palette where the number of colors are the number of samples (118). 
+P120 = createPalette(120,  c("#ff0000", "#00ff00", "#0000ff"))
+#swatch(P120)
+
+png(file.path(out.dir.sampleQC.plots, "density_plot_beta_distributions.png"))
+densityPlot(
+  MSet,
+  pal = P120 ,
+  sampGroups = phenoData$sampleID,
+  legend = FALSE
+)
+dev.off()
+```
+
+### Multidimensional scaling (MDS) plot
+The MDS plot can be use to identify sample mix and major sources in variation.
+In this case we see that sex is driving most of the variation andthe sample X2 is grouping with the water samples, this indicates low quality.
+
+```{r}
+group = MSet@colData$Group_detailed
+group2 = MSet@colData$Gender
+names <- MSet@colData$Sample_Name
+
+
+png(file.path(out.dir.sampleQC.plots, "mds_plot_sex.png"))
+mdsPlot(
+  MSet,
+  sampGroups=group2,
+  sampNames = names,
+  legendNCol=2,
+  legendPos = "bottom"
+)
+dev.off()
+```
+
+### Quick check of control probes
+The control probes from Illumina 450k array are used to asses sample preparation. Most of this probes (as far as I understand) are inherited in the 850k EPIC array,  Im not sure if there are more.
+
+```{r echo=FALSE, out.width='80%'}
+knitr::include_graphics("../../docs/images/450kIllumina_control_probes.png")
+```
+
+### Below is shown how to check on bisulfite conversion step
+
+```{r message=FALSE, warning=FALSE}
+names <- rgSet_ext@colData$Sample_Name
+
+controlStripPlot(rgSet_ext,
+                 sampNames = names,
+                 controls=c("BISULFITE CONVERSION I", "BISULFITE CONVERSION II")
+    )
+# The plots of the different control probes can be exported into a pdf file in one step using the function qcReport
+filename <- file.path(paste0(out.dir.sampleQC, "qcReport.pdf"))
+
+qcReport(rgSet_ext, pdf = filename)
+```
+### Conclusion
+Based on the metric run above I would recommend to remove samples "h20" "h2o" "X1", these samples agreed with the ones reported by Erasmus facility. The sample D7 was reported as suboptimal, I keep this one and see if is filter out downstream.
+
+### Remove bad quality samples and save objects
+#### Remove poor quality samples from rgSet object
+
+But first I have to rename the samples due to replicates of h20 samples.
+
+```{r}
+out.dir.sampleQC.setObj <- file.path(out.dir.sampleQC, "SetObjects")
+
+to.rm <-  c("204808700040_R05C01","204792170094_R08C01","204788480084_R05C01",
+            "204788480084_R02C01","204787070101_R08C01"
+            )
+
+#### Remove poor quality samples from MSet object
+keep <- which(!colnames(MSet) %in% to.rm)
+sf.MSet <- MSet[,keep]
+print(dim(sf.MSet))
+
+group = sf.MSet@colData$Group_detailed
+group2 = sf.MSet@colData$Gender
+names <- sf.MSet@colData$Sample_Name
+
+
+mdsPlot(
+  sf.MSet,
+  sampGroups=group2,
+  sampNames = names,
+  legendNCol=2,
+  legendPos = "bottom"
+)
+
+# Check the sample has been removed by looking at the number of colnames
+file.MSet <- file.path(out.dir.sampleQC.setObj, "sf_MSet.RData")
+save(sf.MSet, file = file.MSet)
+
+```
+
+## Remove bad qc samples from rgSet object
+
+```{r}
+print(dim(rgSet_ext))
+keep <- which(colnames(rgSet_ext) %in% colnames(sf.MSet))# was wrong! !colnames
+sf.rgSet_ext <- rgSet_ext[,keep]
+print(dim(sf.rgSet_ext))
+
+file.sf.rgSet <- file.path(out.dir.sampleQC.setObj, "sf_rgSet_ext.RData")
+save(sf.rgSet_ext, file = file.sf.rgSet)
+```
+
+## Remove bad qc samples from grSet
+
+```{r}
+print(dim(grSet))
+keep <- which(colnames(grSet) %in% colnames(sf.MSet))
+sf.grSet <- grSet[,keep]
+print(dim(sf.grSet))
+
+file.sf.rgSet <- file.path(out.dir.sampleQC.setObj, "sf_grSet.RData")
+save(sf.grSet, file = file.sf.rgSet)
+```
+
+### References
+- https://nbis-workshop-epigenomics.readthedocs.io/en/latest/content/tutorials/methylationArray/Array_Tutorial.html
+- doi: 10.1186/s13059-015-0600-x

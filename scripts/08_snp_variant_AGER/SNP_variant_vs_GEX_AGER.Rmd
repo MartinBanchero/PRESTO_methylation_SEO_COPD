@@ -1,0 +1,369 @@
+---
+title: "SNP_variant_vs_GEX_AGER"
+output: html_document
+---
+
+
+```{r}
+library(vcfR)
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(tibble)
+library(ggplot2)
+library(edgeR)
+```
+
+# Load metadata
+```{r}
+load("../../results/01_pre_process/04_normalization/SetObjects/ENmixMSet_norm.RData")
+
+# 1. Extract phenotype data and ensure it's a data frame
+full.pheno.data <- as.data.frame(ENmixMSet.norm@colData)
+cols.to.keep <- c(
+  "sampleID", "PRESTO_ID", "Group_detailed", "Group_simple", "COPD_Y_or_N"
+  )
+
+pheno.data <- full.pheno.data %>%
+                dplyr::select(cols.to.keep) %>%
+                dplyr::filter(
+                  Group_simple == "Control" | 
+                  Group_simple == "NS_Ctrl" | 
+                  Group_simple == "SEO-COPD"
+                )
+pheno.data$sample_name_ID <- rownames(pheno.data)
+head(pheno.data)
+```
+
+# Load genotypes
+
+```{r}
+file <- "../../data/genotypes/table.snp.chr6.rs2070600.csv"
+snp.data <- read.csv(file, row.names = 1)
+
+snp.data
+```
+## RNAseq
+```{r}
+# load RNA-seq data
+rna.expression <- readr::read_tsv(
+  file.path("../../data/RNA_PRESTO_RV/", "20200427_103972-001_rawcounts.txt"),
+  col_types = readr::cols(),
+) %>%
+  tibble::column_to_rownames("Gene")
+
+pheno.data <- full.pheno.data[
+  full.pheno.data$GenomeScan_ID_RNAseq %in% colnames(rna.expression),]
+print(pheno.data)
+
+rna.expression <- rna.expression[,pheno.data$GenomeScan_ID_RNAseq]
+print(dim(rna.expression))
+
+```
+```{r}
+gtf <- read.table('../../docs/genes.gtf', header = FALSE, skip = 5, sep = "\t")
+genes.info <- gtf[gtf$V3 == "gene", ]
+colnames(genes.info) <- c(
+  "seqname", "source", "feature", "start", "end", 
+  "score", "strand", "frame", "attribute"
+)
+
+df <- as_tibble(str_split_fixed(genes.info$attribute, ';', 7))
+ENS.ID <- as_tibble(str_split_fixed(df$V1, ' ', 2))$V2
+gene.symbol <- as_tibble(str_split_fixed(df$V4, ' ', 3))$V3
+
+genes.info$ENS.ID <- ENS.ID
+genes.info$gene.symbol <- gene.symbol
+genes.info$attribute <- NULL
+head(genes.info)
+
+AGER <- genes.info %>%
+          filter(gene.symbol == "AGER")
+AGER
+```
+# 
+
+```{r}
+common_samples <- intersect(colnames(rna.expression), 
+                            pheno.data$GenomeScan_ID_RNAseq)
+
+# Subset data to common samples
+rna.expression <- rna.expression[, common_samples, drop = FALSE]
+pheno.data <- pheno.data %>%
+  dplyr::filter(GenomeScan_ID_RNAseq %in% common_samples) %>%
+  arrange(match(GenomeScan_ID_RNAseq, common_samples)) %>%
+  as.data.frame()
+  
+# Filter low-expressed genes
+keep_genes <- rowSums(rna.expression > 0) >= 0.2 * ncol(rna.expression)
+rna.expression <- rna.expression[keep_genes, , drop = FALSE]
+
+# EdgeR processing
+DGEL <- edgeR::DGEList(rna.expression)
+
+# Remove samples with zero library size
+keep_samples <- colSums(DGEL$counts) > 0
+if (any(!keep_samples)) {
+  message("Removing ", sum(!keep_samples), " samples with zero library size")
+  DGEL <- DGEL[, keep_samples]
+  }
+  
+# Skip if insufficient samples remain
+if (ncol(DGEL) < 3) {
+  message("Insufficient samples after filtering (", ncol(DGEL), ")")
+  return(NULL)
+  }
+  
+# Calculate normalization factors
+DGEL <- calcNormFactors(DGEL, method = "TMM")
+logCPM <- cpm(DGEL, log = TRUE, prior.count = 3)
+
+AGER <- "ENSG00000204305"
+AGER.rna.expression <- logCPM[AGER, , drop = FALSE]
+
+```
+
+
+
+```{r}
+GEX.df <- data.frame(
+  GenomeScan_ID_RNAseq = colnames(AGER.rna.expression),
+  gene.expression = as.numeric(AGER.rna.expression),
+  stringsAsFactors = FALSE
+)
+
+# Merge all data
+merged.data <- pheno.data %>%
+  left_join(GEX.df, by = "GenomeScan_ID_RNAseq")
+
+df = snp.data %>%
+     left_join(merged.data, by= c("sample.name" = "Sample_Name")
+               ) 
+
+head(merged.data)
+unique(merged.data$Sample_Name)
+```
+
+
+```{r}
+result.dir <- "../../results/08_cpg_snp_AGER/plots/GEX_AGER_snp/"
+dir.create(result.dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r}
+# Create the swarm plot
+library(ggbeeswarm)
+
+# Modified plotting code with better debugging
+plot.data <- df %>%
+  # Remove rows with missing critical data
+  filter(!is.na(genotype.formatted)) %>%
+  filter(!is.na(gene.expression)) %>%
+  # Create condition variable - adjust based on what you found in the debug
+  mutate(condition = case_when(
+    Group_simple == "SEO-COPD" ~ "SEO-COPD",
+    Group_simple %in% c("Control", "NS_Ctrl") ~ "Control",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(condition))  # Remove any remaining NA conditions
+
+plot.data$genotype.formatted <- factor(
+  plot.data$genotype.formatted,
+  levels = c("GG", "GA", "AG")  # desired order
+)
+
+print(
+  paste0("Plot data dimensions after filtering: ", paste(dim(plot.data), collapse = ",")))
+head(plot.data)
+```
+
+
+```{r}
+box.plot <- ggplot(
+  plot.data,
+  aes(x = genotype.formatted, y = gene.expression, fill = condition)) +
+  geom_boxplot(
+    alpha = 0.9,
+    outlier.shape = NA,  # Hide outliers since we'll show all points
+    position = position_dodge(width = 0.8),
+    width = 0.6
+  ) +
+  geom_quasirandom( 
+    aes(color = "black"),
+    dodge.width = 0.8,
+    alpha = 0.9,
+    size = 4,
+    shape = 21,             # shape 21 = circle with fill and border
+    color = "black",        # border (outline) color
+    stroke = 1.2
+  ) +
+  labs(
+    title = "Gene expression Levels by Genotype",
+    subtitle = "Gene: AGER",
+    x = "Genotype",
+    y = "Gene expression Value (logCPM)",
+    fill = "Condition",
+    color = "Condition"
+  ) +
+  scale_fill_manual(values = c("SEO-COPD" = "#E41A1C", "Control" = "#377EB8")) +
+  scale_color_manual(values = c("SEO-COPD" = "#E41A1C", "Control" = "#377EB8")) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 18),
+    plot.subtitle = element_text(hjust = 0.5, size = 14),
+    axis.line.x = element_line(color = "black", linewidth = 0.8),  # show x-axis line
+    axis.line.y = element_line(color = "black", linewidth = 0.8),  # show x-axis line
+    axis.title.x = element_text(size = 20, face = "bold"),
+    axis.title.y = element_text(size = 20, face = "bold"),
+    axis.text.x  = element_text(size = 18),
+    axis.text.y  = element_text(size = 18),
+    legend.title = element_text(size = 13, face = "bold"),
+    legend.text  = element_text(size = 12),
+    legend.position = "top",
+    panel.grid = element_blank()   # Remove grid lines
+  )
+
+filename <- file.path(result.dir, "boxplot_AGER_gene_expression_snp.svg")
+# Save the combined plot as SVG
+ggsave(
+  filename = filename,
+  plot = box.plot,
+  device = "svg",
+  width = 5,
+  height = 7,
+  dpi = 300
+)
+```
+
+# Pie chart
+## Prepare data for pie chart
+
+```{r}
+# Prepare the data correctly
+pie.data <- df %>%
+  filter(!is.na(genotype.formatted) & !is.na(Group_simple)) %>%
+  filter(Group_simple %in% c("Control", "SEO-COPD")) %>%
+  # Remove TT genotype first
+  filter(genotype.formatted != "AA") %>%
+  # Count genotypes by group
+  group_by(Group_simple, genotype.formatted) %>%
+  summarise(n_count = n(), .groups = "drop") %>%
+  # Ensure all genotypes are present for both groups
+  complete(Group_simple, genotype.formatted = c("GG", "GA"), fill = list(n_count = 0)) %>%
+  # Calculate percentages WITHOUT TT
+  group_by(Group_simple) %>%
+  mutate(
+    total = sum(n_count),  # This total excludes TT
+    percentage = ifelse(n_count > 0, round(n_count / total * 100, 1), 0),
+    label = ifelse(n_count > 0, paste0(genotype.formatted, "\n", n_count, " (", percentage, "%)"), "")
+  )
+
+print("Final pie data:")
+print(pie.data)
+```
+
+```{r}
+# Create the donut plot function
+make_donut <- function(data, title) {
+  ggplot(data, aes(x = 2, y = percentage, fill = genotype.formatted)) +
+    geom_col(color = "white", width = 1) +
+    coord_polar(theta = "y", start = 0) +
+    xlim(0.5, 2.5) +  # creates the donut hole
+    geom_text(aes(label = label),
+              position = position_stack(vjust = 0.5),
+              size = 4, color = "white") +
+    scale_fill_brewer(palette = "Set2") +
+    theme_void() +
+    ggtitle(title) +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+      legend.position = "none"
+    )
+}
+
+# Filter and plot for each group
+p1 <- make_donut(pie.data %>% filter(Group_simple == "Control"), "Control Group")
+p2 <- make_donut(pie.data %>% filter(Group_simple == "SEO-COPD"), "SEO-COPD Group")
+
+# Display both plots side by side
+library(patchwork)
+final.donut.plot <- p1 + p2
+
+filename <- file.path(result.dir, "donut_chart_AGER_gene_expression_snp.svg")
+# Save the combined plot as SVG
+ggsave(
+  filename = filename,
+  plot = final.donut.plot,
+  device = "svg",
+  width = 10,
+  height = 5,
+  dpi = 300
+)
+```
+
+```{r}
+# Load libraries
+library(ggbeeswarm)
+
+# Swarm plot with group means
+plot <- ggplot(plot.data, aes(x = genotype.formatted, y = gene.expression, color = condition)) +
+  
+  # Swarm points
+  geom_beeswarm(
+    dodge.width = 0.8,
+    alpha = 0.7,
+    size = 1.5
+  ) +
+  # Horizontal line for the mean of each group-condition combination
+  stat_summary(
+    fun = mean,
+    geom = "crossbar",
+    aes(group = condition),
+    color = "black",
+    width = 0.6,
+    fatten = 1,
+    position = position_dodge(width = 0.8),
+    show.legend = FALSE
+  ) +
+  
+  labs(
+    title = "Gene expression Levels by Genotype",
+    subtitle = "Gene: AGER",
+    x = "Genotype",
+    y = "Gene expression Value (logCPM)",
+    fill = "Condition",
+    color = "Condition"
+  ) +
+  
+  scale_color_manual(values = c("SEO-COPD" = "#E41A1C", "Control" = "#377EB8")) +
+  
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "top",
+    axis.title.x = element_text(size = 20, face = "bold"),
+    axis.text.x = element_text(angle = 0, hjust = 0.5, size = 18),
+    axis.title.y = element_text(size = 20, face = "bold"),
+    axis.text.y  = element_text(size = 18),
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text  = element_text(size = 14),
+    panel.grid = element_blank()   # Remove grid lines
+  )
+
+filename <- file.path(result.dir, "swarm_plot_with_means.svg")
+
+# Save the swarm plot with means as SVG
+ggsave(
+  filename = filename,
+  plot = plot,
+  device = "svg",
+  width = 8,
+  height = 5,
+  dpi = 300
+)
+```
+
+
+```
+

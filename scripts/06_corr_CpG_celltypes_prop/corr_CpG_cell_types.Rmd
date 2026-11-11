@@ -1,0 +1,832 @@
+---
+title: "corr_cpg_celltypes"
+output: html_document
+date: "2025-02-21"
+---
+
+### Introduccion
+1. Correlation Analysis
+The goal of this step is to identify CpG sites whose methylation levels correlate with the inferred cell type proportions.
+
+Steps:
+Prepare the data:
+- Ensure your EPIC array methylation data (e.g., beta-values or M-values) and CIBERSORTx cell type proportions are in the same sample order.
+- Use a matrix where rows represent CpGs and columns represent samples for methylation data, and a matrix where rows represent cell types and columns represent samples for cell type proportions.
+
+Choose a correlation method:
+- Use Pearson correlation if the data is normally distributed.
+- Use Spearman correlation if the data is not normally distributed or if you suspect non-linear relationships.
+
+Perform correlation for each CpG-cell type pair:
+- Loop through each CpG site and calculate its correlation with each cell type proportion.
+
+Adjust for multiple testing:
+- Since you are testing thousands of CpGs, apply a multiple testing correction like False Discovery Rate (FDR) or Bonferroni.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(reshape2)
+library(gridExtra)
+library(tidyr)
+library(RColorBrewer)
+library(ENmix)
+library(pheatmap)
+library(ggplot2)
+library(ggpubr)
+library(rstatix)
+```
+
+# Save dir
+```{r}
+results.dir <- "../../results/06_corr_CpG_celltypes/"
+dir.create(results.dir, recursive=TRUE)
+```
+
+# Data preparation
+
+```{r}
+# metadata
+df.pheno.SEO.ES <- read_csv("../../data/cell_proportions/pheno.data_SEOvsCtrl_ES.csv")
+
+# Cell-type proportions to use
+#   "MuSiC"           = new MuSiC estimates (MuSiC_* columns from 00_make_main_table.Rmd)
+#   "CIBERSORTx_2024" = original columns already in pheno.data_SEOvsCtrl_ES.csv
+CELLPROP_SOURCE <- "MuSiC"
+
+if (CELLPROP_SOURCE == "MuSiC") {
+  main.tab <- read_csv("../../results/00_data_wrangling/main_table_cell_proportions_MUSIC.csv",
+                       show_col_types = FALSE)
+  music.cols <- grep("^MuSiC_", names(main.tab), value = TRUE)
+  stopifnot(length(music.cols) > 0)
+  music.tab <- main.tab |>
+    dplyr::filter(!is.na(GenomeScan_ID_RNAseq)) |>
+    dplyr::select(GenomeScan_ID_RNAseq, dplyr::all_of(music.cols)) |>
+    dplyr::distinct(GenomeScan_ID_RNAseq, .keep_all = TRUE)
+  n.before <- nrow(df.pheno.SEO.ES)
+  df.pheno.SEO.ES <- df.pheno.SEO.ES |>
+    dplyr::left_join(music.tab, by = "GenomeScan_ID_RNAseq", na_matches = "never")
+  stopifnot(nrow(df.pheno.SEO.ES) == n.before)
+
+  # cell types whose estimates track their marker genes (see vault note)
+  CELL_TYPES_CORR  <- c("MuSiC_AT1", "MuSiC_AT2", "MuSiC_Alveolar_macrophages", "MuSiC_EC_capillary",
+                        "MuSiC_Fibroblasts", "MuSiC_Smooth_muscle")
+  CELL_TYPES_STATS <- CELL_TYPES_CORR
+  results.dir <- "../../results/06_corr_CpG_celltypes_MuSiC/"      # keeps the CIBERSORTx results
+  dir.create(results.dir, recursive = TRUE, showWarnings = FALSE)
+} else {
+  CELL_TYPES_CORR  <- c("Fibroblast.lineage", "AT2", "Smooth.muscle", "Alveolar.macrophages", "EC.arterial",
+                        "EC.venous", "Dendritic.cells", "B.cell.lineage", "Monocytes")
+  CELL_TYPES_STATS <- c(CELL_TYPES_CORR, "Basal")
+}
+
+load(
+  "../../results/03_EDA/outliers_detection/mtx_mvalues_winsor.RData"
+)
+print(paste0("Dim win.mtx.m.values: ", paste0(dim(win.m.values), collapse = ",")))
+
+# load betas
+file <- "../../results/04_DM/new_final_only_specific_SEO_DMPs.csv"
+SEO.sig.DMPs <- read_csv(file, show_col_types = FALSE)
+SEO.sig.DMPs
+
+```
+# Cell portions with statistical evaluation between conditions
+- Test for statistically significant differences between groups. I use wilcoxon rank sum test, since the proportion distributions are not normal, cell proportions are bound between 0 and 1. The variance als is not constant.
+
+- Sample sizes per group may be small (<30)
+- t-tests assume normality, which is hard to verify with small samples
+- Wilcoxon is more robust with limited data
+
+
+```{r}
+# Your data preparation code
+cols <- c("SEO_COPD_Y_or_N", CELL_TYPES_STATS)
+df <- df.pheno.SEO.ES[, cols]
+colnames(df) <- sub("^MuSiC_", "", colnames(df))   # drop the source prefix from all plot labels
+colnames(df)[colnames(df) == "Alveolar.macrophages"] <- "Alv.macrophages"
+
+# Convert df to long format
+df_long <- gather(
+  df,
+  key = "celltypes",
+  value = "props",
+  -"SEO_COPD_Y_or_N"
+)
+
+results.dir.plots <- file.path(paste0(results.dir, "plots/"))
+dir.create(results.dir.plots, recursive = TRUE)
+
+# Check distribution of proportions
+plt.prop.dist <- ggplot(df_long, aes(x = props)) +
+      geom_histogram(bins = 30) +
+      facet_wrap(~celltypes, scales = "free") +
+      theme_bw()
+
+# Save the plot
+filename = paste0(results.dir.plots, "proportions_distribution_per_celltypes.png")
+ggsave(
+  filename = filename,
+  plot = plt.prop.dist,
+  device = "png",
+  dpi = 300,
+  width = 10,
+  height = 8
+)
+
+```
+```{r}
+# Set your desired FDR threshold
+fdr_threshold <- 0.05  
+
+# Perform statistical tests for each cell type with custom FDR threshold
+stat_test <- df_long %>%
+  group_by(celltypes) %>%
+  # Apply logit transformation with small constant to avoid infinite values
+  mutate(
+    # Add small constant to avoid 0 and 1, then apply logit transform
+    logit_props = log((props + 0.001) / (1 - props + 0.001))
+  ) %>%
+  # Perform t-test on logit-transformed proportions
+  rstatix::t_test(logit_props ~ SEO_COPD_Y_or_N) %>%
+  adjust_pvalue(method = "fdr") %>%
+  # Create custom significance labels based on your FDR threshold
+  mutate(
+    p.adj.signif = case_when(
+      p.adj <= fdr_threshold & p.adj > 0.001 ~ paste0("FDR ≤ ", fdr_threshold),
+      p.adj <= 0.001 ~ "***",
+      TRUE ~ "ns"
+    )
+  ) %>%
+  add_xy_position(x = "celltypes", dodge = 0.8)
+
+head(stat_test)
+```
+
+
+```{r}
+library(ggbeeswarm)
+
+# Readable cell-type names for the plot (underscores/dots -> spaces)
+pretty_ct <- function(x) gsub("[_.]", " ", x)
+
+df_plot <- df_long %>%
+  dplyr::mutate(celltypes = pretty_ct(celltypes))
+
+# Brackets on the proportion scale (the test itself is on logit proportions):
+# one bracket per panel, just above that cell type's highest value
+stat_plot <- stat_test %>%
+  dplyr::select(-dplyr::any_of(c("x", "xmin", "xmax", "y.position"))) %>%
+  dplyr::mutate(celltypes = pretty_ct(celltypes)) %>%
+  dplyr::left_join(
+    df_plot %>% dplyr::group_by(celltypes) %>% dplyr::summarise(ymax = max(props, na.rm = TRUE)),
+    by = "celltypes"
+  ) %>%
+  dplyr::mutate(
+    y.position = ymax * 1.10,
+    label = ifelse(p.adj <= fdr_threshold,
+                   paste0("FDR = ", signif(p.adj, 2)),
+                   paste0("ns (FDR = ", signif(p.adj, 2), ")"))
+  )
+
+plt <- ggplot(df_plot, aes(x = SEO_COPD_Y_or_N, y = props)) +
+  geom_boxplot(aes(fill = SEO_COPD_Y_or_N), outlier.shape = NA, color = "black", alpha = 0.7, width = 0.6, coef = 1.5) +
+  geom_quasirandom(aes(fill = SEO_COPD_Y_or_N), shape = 21, color = "black", size = 1.8, stroke = 0.6, width = 0.2, alpha = 0.9) +
+  ggpubr::stat_pvalue_manual(
+    stat_plot,
+    label = "label",
+    tip.length = 0.02,
+    bracket.size = 0.5,
+    size = 4
+  ) +
+  facet_wrap(~ celltypes, scales = "free_y", nrow = 2) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0.02, 0.15))) +
+  scale_fill_manual(values = c("darkred", "cadetblue")) +
+  labs(
+    title = "Cell-type proportions by COPD status",
+    subtitle = "t-test on logit-transformed proportions, BH-adjusted (FDR)",
+    x = NULL,
+    y = "Estimated proportion",
+    fill = NULL
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.background = element_rect(fill = "grey92"),
+    strip.text = element_text(face = "bold", size = 13),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 17),
+    plot.subtitle = element_text(hjust = 0.5, size = 11),
+    axis.title.y = element_text(face = "bold"),
+    axis.text.x = element_text(size = 11),
+    legend.position = "top",
+    legend.text = element_text(size = 12)
+  )
+
+print(plt)
+
+filename = paste0(results.dir.plots, "cell_proportions_with_stats_fdr_ttest", fdr_threshold, ".png")
+ggsave(filename = filename, plot = plt, device = "png", dpi = 300,
+       width = 3 * ceiling(length(unique(df_plot$celltypes)) / 2) + 1, height = 8)
+
+print(paste("Statistical test results (FDR ≤", fdr_threshold, "):"))
+print(stat_test %>% filter(p.adj <= fdr_threshold))
+```
+## Subset methylation mtx
+
+```{r}
+rownames(df.pheno.SEO.ES) <- df.pheno.SEO.ES$Row.names
+# Subset samples
+beta.values <- ENmix::M2B(win.m.values)
+sample_keep =  which(rownames(df.pheno.SEO.ES) %in% base::colnames(beta.values))
+pheno.data = df.pheno.SEO.ES[sample_keep,]
+rownames(pheno.data) <- pheno.data$Row.names
+
+idx.subjects <- match(pheno.data$Row.names, base::colnames(beta.values))
+mtx.beta.values <- as.matrix(beta.values[,idx.subjects])
+dim(mtx.beta.values)
+
+mtx.m.values <- as.matrix(win.m.values[,idx.subjects])
+dim(mtx.m.values)
+```
+
+```{r}
+cpg.ids <- SEO.sig.DMPs$CpG.id
+
+# Pre-extract methylation data for all CpGs at once
+m.values <- mtx.m.values[cpg.ids, rownames(pheno.data), drop = FALSE]
+beta.values<- mtx.beta.values[cpg.ids, rownames(pheno.data), drop = FALSE]
+
+#"SEO_COPD_Y_or_N"
+cell.type.proportions <- pheno.data[, c("Row.names", CELL_TYPES_CORR)]
+
+cell.type.proportions <- as.data.frame(cell.type.proportions)
+rownames(cell.type.proportions) <- cell.type.proportions$Row.names
+cell.type.proportions <- cell.type.proportions[, -1]
+# drop the source prefix: cell-type names feed every plot, heatmap and results table below
+colnames(cell.type.proportions) <- sub("^MuSiC_", "", colnames(cell.type.proportions))
+
+# Initialize results list
+results <- list()
+
+# Loop through each cell type
+for (cell.type in colnames(cell.type.proportions)) {
+  # Extract proportions for this cell type
+  proportions <- as.numeric(cell.type.proportions[, cell.type])
+  
+  # Calculate correlations and p-values in one pass for efficiency
+  corr.results <- apply(
+    beta.values,
+    1,
+    function(cpg) {
+      # Handle missing values
+      complete.cases <- complete.cases(cpg, proportions)
+      cpg.clean <- cpg[complete.cases]
+      prop.clean <- proportions[complete.cases]
+      
+      # Skip if not enough observations
+      if (length(cpg.clean) < 3) {
+        return(list(correlation = NA, p.value = NA))
+      }
+      
+      # Calculate correlation with exact=FALSE to handle ties
+      ct <- suppressWarnings(
+        cor.test(cpg.clean, prop.clean, method = "spearman", exact = FALSE)
+      )
+      # Return correlation and p-value
+      list(correlation = ct$estimate, p.value = ct$p.value)
+    }
+  )
+  
+  # Extract results
+  correlations <- sapply(corr.results, function(x) x$correlation)
+  p.values <- sapply(corr.results, function(x) x$p.value)
+
+ 
+  # Handle NA values before p-value adjustment
+  na.mask <- !is.na(p.values)
+  adj.p.values <- rep(NA, length(p.values))
+  adj.p.values[na.mask] <- p.adjust(p.values[na.mask], method = "fdr")
+  
+  # Store results in a data frame
+  results[[cell.type]] <- data.frame(
+    CpG = rownames(beta.values),
+    Correlation = correlations,
+    P.Value = p.values,
+    Adj.P.Value = adj.p.values,
+    stringsAsFactors = FALSE
+  )
+  
+  # Remove temporary variables
+  rm(corr.results, correlations, p.values, adj.p.values)
+}
+
+results
+```
+```{r}
+plot_specific_cpgs <- function(results, beta.values, cell.type.proportions, cpgs, output_dir = NULL) {
+  # Check if all requested CpGs are available
+  missing_cpgs <- base::setdiff(cpgs, rownames(beta.values))
+  if (length(missing_cpgs) > 0) {
+    warning(paste("The following CpGs were not found:", paste(missing_cpgs, collapse = ", ")))
+    cpgs <- intersect(cpgs, rownames(beta.values))
+  }
+  
+  if (length(cpgs) == 0) {
+    stop("No valid CpGs provided")
+  }
+  
+  # Loop through each cell type
+  for (cell.type in colnames(cell.type.proportions)) {
+    # Prepare data for plotting
+    plot_data <- as.data.frame(t(beta.values[cpgs, , drop = FALSE]))
+    plot_data$Sample <- rownames(plot_data)
+    
+    plot_data <- merge(
+      plot_data,
+      data.frame(
+        Sample = rownames(cell.type.proportions),
+        logit_proportion = log((cell.type.proportions[, cell.type] + 1e-6) / (1 - cell.type.proportions[, cell.type] + 1e-6))
+      ),
+      by = "Sample"
+    )
+
+    # Convert to long format for ggplot
+    plot_data_long <- melt(plot_data, 
+                           id.vars = c("Sample", "logit_proportion"),
+                           variable.name = "CpG", 
+                           value.name = "Methylation")
+    
+    # Add correlation information to the plot
+    res_cell <- results[[cell.type]]
+    annotation_df <- data.frame(
+      CpG = cpgs,
+      Correlation = res_cell$Correlation[match(cpgs, res_cell$CpG)],
+      P.Value = res_cell$P.Value[match(cpgs, res_cell$CpG)]
+    )
+    annotation_df$Label <- paste0("r = ", round(annotation_df$Correlation, 3), 
+                                 "\np = ", signif(annotation_df$P.Value, 3))
+    
+    # Create plot
+    p <- ggplot(plot_data_long, aes(x = logit_proportion, y = Methylation)) +
+      geom_point(alpha = 0.6) +
+      geom_smooth(method = "lm", se = FALSE, color = "blue") +
+      geom_text(data = annotation_df, 
+                aes(x = Inf, y = Inf, label = Label), 
+                hjust = 1.1, vjust = 1.1, size = 3) +
+      facet_wrap(~ CpG, scales = "free_y") +
+      labs(title = paste("Specific CpGs vs", cell.type, "logit_proportion"),
+           x = paste(cell.type, "logit_proportion"),
+           y = "Methylation (Beta)") +
+      theme_bw() +
+      theme(plot.title = element_text(hjust = 0.5))
+    
+    # Save or display plot
+    if (!is.null(output_dir)) {
+      if (!dir.exists(output_dir)) {
+        dir.create(output_dir, recursive = TRUE)
+      }
+      ggsave(file.path(output_dir, paste0("SpecificCpGs_", cell.type, "_logit_prop.png")), 
+             p, width = 7, height = 5)
+    } else {
+      print(p)
+    }
+  }
+}
+```
+
+
+```{r}
+plot_specific_cpgs <- function(results, beta.values, cell.type.proportions, cpgs, output_dir = NULL) {
+  # Check if all requested CpGs are available
+  missing_cpgs <- base::setdiff(cpgs, rownames(beta.values))
+  if (length(missing_cpgs) > 0) {
+    warning(paste("The following CpGs were not found:", paste(missing_cpgs, collapse = ", ")))
+    cpgs <- intersect(cpgs, rownames(beta.values))
+  }
+  
+  if (length(cpgs) == 0) {
+    stop("No valid CpGs provided")
+  }
+  
+  # Loop through each cell type
+  for (cell.type in colnames(cell.type.proportions)) {
+    # Prepare data for plotting
+    plot_data <- as.data.frame(t(beta.values[cpgs, , drop = FALSE]))
+    plot_data$Sample <- rownames(plot_data)
+    
+    plot_data <- merge(
+      plot_data,
+      data.frame(
+        Sample = rownames(cell.type.proportions),
+        proportion = cell.type.proportions[, cell.type],
+        log2_proportion = log2(cell.type.proportions[, cell.type] + 1e-6), # add small constant to avoid log(0)
+        logit_proportion = log(
+                            cell.type.proportions[,cell.type] + 1e-6
+                            ) / (1 - cell.type.proportions[,cell.type] + 1e-6) 
+        ),
+      by = "Sample"
+    )
+
+    # Convert to long format for ggplot
+    plot_data_long <- melt(plot_data, 
+                           #id.vars = c("Sample", "proportion"), 
+                           id.vars = c(
+                             "Sample",
+                             #"log2_proportion",
+                             "logit_proportion"
+                             ),
+                           variable.name = "CpG", 
+                           value.name = "Methylation")
+    
+    # Add correlation information to the plot
+    res_cell <- results[[cell.type]]
+    annotation_df <- data.frame(
+      CpG = cpgs,
+      Correlation = res_cell$Correlation[match(cpgs, res_cell$CpG)],
+      P.Value = res_cell$P.Value[match(cpgs, res_cell$CpG)]
+    )
+    annotation_df$Label <- paste0("r = ", round(annotation_df$Correlation, 3), 
+                                 "\np = ", signif(annotation_df$P.Value, 3))
+    
+    # Create plot
+    p <- ggplot(plot_data_long, aes(x = logit_proportion, y = Methylation)) +
+      #geom_point(alpha = 0.6) +
+       geom_point(
+        fill = "#377EB8", 
+        size = 3, 
+        alpha = 0.8,
+        shape = 21,
+        color = "black",
+        stroke = 1
+      ) +
+      geom_smooth(method = "lm", se = FALSE, color = "blue") +
+      geom_text(data = annotation_df, 
+                aes(x = Inf, y = Inf, label = Label), 
+                hjust = 1.1, vjust = 1.1, size = 3) +
+      facet_wrap(~ CpG, scales = "free_y") +
+      labs(title = paste("Specific CpGs vs", cell.type, "logit_proportion"),
+           x = paste(cell.type, "logit_proportion"),
+           y = "Methylation (Beta)") +
+      theme_bw() +
+      theme(
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        axis.line.x = element_line(color = "black", linewidth = 0.8),
+        axis.line.y = element_line(color = "black", linewidth = 0.8),
+        axis.title.x = element_text(size = 14, face = "bold"),
+        axis.title.y = element_text(size = 14, face = "bold"),
+        axis.text.x = element_text(size = 14, face = "bold"),
+        axis.text.y = element_text(size = 14, face = "bold"),
+        strip.text = element_text(size = 14, face = "bold"),
+        panel.grid = element_blank(),
+        panel.spacing = unit(2, "lines")
+      )
+    
+    #  theme(plot.title = element_text(hjust = 0.5))
+    
+    # Save or display plot
+    if (!is.null(output_dir)) {
+      if (!dir.exists(output_dir)) {
+        dir.create(output_dir, recursive = TRUE)
+      }
+      ggsave(file.path(output_dir, paste0("SpecificCpGs_", cell.type, "_logit_prop.png")), 
+             p, width = 10, height = 5)
+    } else {
+      print(p)
+    }
+  }
+}
+```
+
+
+```{r}
+# Define your CpGs of interest
+results.dir.plots.cpg <- file.path(paste0(results.dir.plots, "celltype_cpg/logit_proportions_new/"))
+dir.create(results.dir.plots.cpg, recursive = TRUE)
+
+cpgs <- c("cg09238049", "cg08673857")
+
+for (cpg in cpgs){
+  output.dir = file.path(paste0(results.dir.plots.cpg, cpg))
+  dir.create(output.dir, recursive = TRUE)
+
+  # Call the function
+  plot_specific_cpgs(results, beta.values, cell.type.proportions, 
+                   cpgs = cpg, output_dir = output.dir )
+}
+```
+
+```{r}
+sig.cpgs <- Reduce(base::union, lapply(results, function(x) x$CpG[x$Adj.P.Value < 0.05]))
+sig.cpgs
+```
+
+
+# Visualization of correlation results
+
+```{r}
+results.dir.plots.corr <- file.path(paste0(results.dir.plots, "corr_heatmaps/"))
+dir.create(results.dir.plots.corr, recursive = TRUE)
+
+corr.mtx <- sapply(results, function(x) x$Correlation)
+rownames(corr.mtx) <- results[[1]]$CpG  # Assuming CpG order is consistent
+sig.cor.matrix <- sapply(results, function(x) ifelse(x$Adj.P.Value < 0.05, "*", ""))
+rownames(sig.cor.matrix) <- rownames(corr.mtx)
+
+
+pheatmap(
+  mat = corr.mtx,
+  display_numbers = sig.cor.matrix[rownames(corr.mtx), ],
+  color = colorRampPalette(c("blue", "white", "red"))(100),  # Diverging color scale
+  breaks = seq(-1, 1, length.out = 100),                     # Scale from -1 to 1
+  cluster_rows = FALSE,                                      # Cluster CpGs
+  cluster_cols = FALSE,                                      # Cluster cell types
+  show_rownames = FALSE,                                     # Hide CpG names (too many)
+  show_colnames = TRUE,                                      # Show cell type names
+  main = "Correlation Heatmap: CpGs vs. Cell Types",
+  fontsize_col = 12,                                           # Adjust column font
+  na_col = "grey",
+  filename = file.path(results.dir.plots.corr, "corr_heatmap_all_cpgs_fdr_005.png"),
+)
+
+```
+
+# Correlation heatmap of significant cpgs vs cell types
+
+```{r}
+# Filter for significant CpGs (Adj.P.Value < 0.05)
+sig.cpgs <- Reduce(base::union, lapply(results, function(x) x$CpG[x$Adj.P.Value < 0.05]))
+cor.matrix.filtered <- corr.mtx[rownames(corr.mtx) %in% sig.cpgs, ]
+
+pval.mtx <- sapply(results, function(x) x$Adj.P.Value)
+rownames(pval.mtx) <- results[[1]]$CpG  # Assuming CpG order is consistent
+
+pval.mtx.filtered <- pval.mtx[rownames(pval.mtx) %in% sig.cpgs, ]
+
+# 2. Create labels matrix using the filtered matrices
+labels.matrix <- matrix( 
+  NA_character_, 
+  nrow = nrow(cor.matrix.filtered),
+  ncol = ncol(cor.matrix.filtered),
+  dimnames = dimnames(cor.matrix.filtered)
+)
+
+# 3. Fill the labels matrix safely
+for (i in 1:nrow(cor.matrix.filtered)) {
+  for (j in 1:ncol(cor.matrix.filtered)) {
+    if (!is.na(cor.matrix.filtered[i,j])) {
+      labels.matrix[i,j] <- sprintf(
+        "%.2f%s", 
+        cor.matrix.filtered[i,j], 
+        ifelse(pval.mtx.filtered[i,j] < 0.1, "*", "")
+      )
+    } else {
+      labels.matrix[i,j] <- ""
+    }
+  }
+}
+
+# Replace NA correlations (e.g., due to insufficient data) with empty strings
+labels.matrix[is.na(cor.matrix.filtered)] <- ""
+
+pheatmap(
+  mat = cor.matrix.filtered,
+  color = colorRampPalette(c("blue", "white", "red"))(100),  # Diverging color scale
+  breaks = seq(-1, 1, length.out = 100),                     # Scale from -1 to 1
+  cluster_rows = TRUE,                                        # Cluster CpGs
+  cluster_cols = FALSE,                                        # Cluster cell types
+  show_rownames = TRUE,                                      # Hide CpG names (too many)
+  show_colnames = TRUE,
+  number_color = "black",
+  display_numbers = labels.matrix, # Show cell type names
+  main = "Correlation Heatmap: CpGs vs. Cell Types",
+  fontsize_col = 12,                                           # Adjust column font
+  na_col = "grey",
+  angle_row = 45,
+  height = 7,         # Control overall dimensions
+  width = 5,
+  filename = file.path(results.dir.plots.corr, "corr_heatmap_sig_cpgs_celltype_fdr005.png"),
+)
+```
+
+```{r}
+# Filter for significant CpGs (Adj.P.Value < 0.05)
+sig.cpgs <- Reduce(base::union, lapply(results, function(x) x$CpG[x$Adj.P.Value < 0.05]))
+cor.matrix.filtered <- corr.mtx[rownames(corr.mtx) %in% sig.cpgs, ]
+
+pval.mtx <- sapply(results, function(x) x$Adj.P.Value)
+rownames(pval.mtx) <- results[[1]]$CpG  # Assuming CpG order is consistent
+
+pval.mtx.filtered <- pval.mtx[rownames(pval.mtx) %in% sig.cpgs, ]
+
+# TRANSPOSE the matrices to get CpGs in columns and cell types in rows
+cor.matrix.filtered.t <- t(cor.matrix.filtered)
+pval.mtx.filtered.t <- t(pval.mtx.filtered)
+
+# 2. Create labels matrix using the TRANSPOSED filtered matrices
+labels.matrix <- matrix( 
+  NA_character_, 
+  nrow = nrow(cor.matrix.filtered.t),
+  ncol = ncol(cor.matrix.filtered.t),
+  dimnames = dimnames(cor.matrix.filtered.t)
+)
+
+# 3. Fill the labels matrix safely
+for (i in 1:nrow(cor.matrix.filtered.t)) {
+  for (j in 1:ncol(cor.matrix.filtered.t)) {
+    if (!is.na(cor.matrix.filtered.t[i,j])) {
+      labels.matrix[i,j] <- sprintf(
+        "%.2f%s", 
+        cor.matrix.filtered.t[i,j], 
+        ifelse(pval.mtx.filtered.t[i,j] < 0.1, "*", "")
+      )
+    } else {
+      labels.matrix[i,j] <- ""
+    }
+  }
+}
+
+# Replace NA correlations (e.g., due to insufficient data) with empty strings
+labels.matrix[is.na(cor.matrix.filtered.t)] <- ""
+
+pheatmap(
+  mat = cor.matrix.filtered.t,  # Use transposed matrix
+  color = colorRampPalette(c("blue", "white", "red"))(100),  # Diverging color scale
+  breaks = seq(-1, 1, length.out = 100),                     # Scale from -1 to 1
+  cluster_rows = FALSE,                                       # Cluster cell types (now rows)
+  cluster_cols = TRUE,                                        # Cluster CpGs (now columns)
+  show_rownames = TRUE,                                      # Show cell type names (now rows)
+  show_colnames = TRUE,                                      # Show CpG names (now columns)
+  number_color = "black",
+  display_numbers = labels.matrix, # Show correlation values with asterisks
+  main = "Correlation Heatmap: Cell Types vs. CpGs",
+  fontsize_col = 8,                                           # Smaller font for CpG names
+  fontsize_row = 12,                                          # Larger font for cell types
+  na_col = "grey",
+  angle_col = 90,                                            # Rotate CpG names
+  height = 5,                                                # Adjust dimensions
+  width = 3,
+  filename = file.path(results.dir.plots.corr, "corr_heatmap_cpg_vs_celltypes_fdr005.png"),
+)
+
+```
+
+I want to focus on Cpgs with significant correlations with b cells proportions.
+
+####################################################################
+
+#Not used not enough samples, but If I had then the following:
+This approach would be better than correlation since it would be nice to correct for batch, using the control PCs.
+
+### 2. Linear Regression Modeling
+For CpGs showing significant correlations with cell type proportions, you can refine the analysis by performing linear regression while adjusting for potential confounders (e.g., age, sex, smoking status).
+
+Steps:
+Prepare covariates:
+- Create a data.frame containing covariates such as age, sex, smoking status, batch effects, or other technical variables.
+
+Run linear regression for each significant CpG:
+- Use the methylation beta-value as the dependent variable.
+- Use the cell type proportion as the independent variable.
+- Include covariates in the model.
+
+Extract results:
+- For each CpG-cell type pair, extract the regression coefficient (β), p-value, and adjusted p-value.
+- Adjust for multiple testing:
+- Correct p-values across all tests using FDR or Bonferroni correction.
+
+
+```{r}
+
+# Ensure sample order matches between datasets
+covariates <- pheno.data[colnames(beta.values), ]
+
+# Initialize results storage for linear regression
+regression.results <- list()
+
+# Loop through each significant CpG and each cell type proportion
+for (cpg in rownames(beta.values)) {
+  for (cell.type in colnames(cell.type.proportions)) {
+    # Create a data frame for modeling
+    model.data <- data.frame(
+      Methylation = beta.values[cpg, ],
+      ct.proportion = as.numeric(cell.type.proportions[ , cell.type]),
+      covariates
+    )
+    
+    # Fit linear regression model
+    model <- lm(Methylation ~ ct.proportion + SEO_COPD_Y_or_N + Age + Gender + PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7,
+                data = model.data)
+    
+    # Extract coefficients and p-value for the cell type proportion term
+    coef_summary <- summary(model)$coefficients["ct.proportion", ]
+    
+    # Store results
+    regression.results[[paste(cpg, cell.type, sep = "_")]] <- data.frame(
+      CpG = cpg,
+      Cell_Type = cell.type,
+      Beta = coef_summary["Estimate"],
+      P.Value = coef_summary["Pr(>|t|)"]
+    )
+  }
+}
+
+# Combine all regression results into a single table
+df.regr.results <- bind_rows(regression.results)
+
+# Adjust p-values using FDR correction
+df.regr.results$Adj.P.Value <- p.adjust(df.regr.results$P.Value, method = "fdr")
+
+# Filter significant associations (e.g., FDR < 0.05)
+filtered.sig.regr.results <- df.regr.results %>%
+                        filter((P.Value < 0.05) & (Beta > 0.1 | Beta < -0.1))  # use nominal
+                        
+# Save results to file
+write.csv(
+  filtered.sig.regr.results,
+  file.path("filtered_regression_cpgs_cell_types.csv"),
+  row.names = FALSE
+)
+
+```
+
+
+```{r}
+df <- data.frame(
+  CpG = filtered.sig.regr.results$CpG,
+  Cell.Type = filtered.sig.regr.results$Cell_Type,
+  Beta = filtered.sig.regr.results$Beta,
+  P.Value = filtered.sig.regr.results$P.Value
+)
+
+# Create beta matrix (corrected)
+beta.matrix <- df %>%
+  dplyr::select(CpG, Cell.Type, Beta) %>%  # Note: Using Beta, not P.Value
+  pivot_wider(
+    names_from = Cell.Type, 
+    values_from = Beta
+  ) %>%
+  column_to_rownames("CpG") %>%
+  as.matrix()
+
+pval.matrix <- df %>%
+  dplyr::select(CpG, Cell.Type, P.Value) %>%
+  pivot_wider(
+    names_from = Cell.Type, 
+    values_from = P.Value
+  ) %>%
+  column_to_rownames("CpG") %>%
+  as.matrix()
+
+
+# Create labels: Beta values + stars for significance
+labels.matrix <- matrix(
+  sprintf(
+    "%.2g%s", 
+    beta.matrix, 
+    ifelse(pval.matrix < 0.05, "*", "")
+  ),
+  nrow = nrow(beta.matrix),
+  dimnames = dimnames(beta.matrix)
+)
+
+#colOrder <- c("Smooth.muscle", "Dendritic.cells", "B.cell.lineage", "EC.venous", "Fibroblast.lineage", "Monocytes" , "EC.arterial", "AT2", "Alveolar.macrophages")
+#beta.matrix <- beta.matrix[, colOrder]
+
+pheatmap(
+  mat = beta.matrix,
+  display_numbers = labels.matrix,  # Show Beta + significance
+  number_color = "black",
+  fontsize_number = 5,
+  fontsize_row = 5,
+  show_rownames = TRUE,            # Show CpG names on left
+  show_colnames = TRUE,            # Show cell types on top
+  cluster_rows = FALSE,            # Disable clustering (adjust as needed)
+  cluster_cols = FALSE,
+  color = colorRampPalette(c("blue", "white", "red"))(100),
+  breaks = seq(-max(abs(beta.matrix), na.rm = TRUE), 
+               max(abs(beta.matrix), na.rm = TRUE), 
+               length.out = 100),
+  main = "DNA Methylation (Beta) by Cell Type",
+  na_col = "grey"
+)
+
+```
+
+### 3. Identify Significant Associations
+After completing both correlation analysis and linear regression modeling:
+- Focus on CpGs that show consistent significant associations across both analyses.
+- Interpret these associations in the context of nearby genes and known biological functions   of the associated cell types.
+
+Notes on Interpretation:
+- A positive correlation or regression coefficient indicates that higher methylation at a CpG   is associated with higher abundance of a specific cell type.
+- A negative correlation suggests that lower methylation is associated with higher abundance   of the cell type.
+- Consider visualizing top hits using scatterplots to confirm patterns (e.g., ggplot2).
+
+
+

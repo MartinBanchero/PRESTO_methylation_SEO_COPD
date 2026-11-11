@@ -1,0 +1,36 @@
+# ---------------------------------------------------------------
+# PRESTO_methylation_SEO_COPD - code only.
+# Allow-list: everything is ignored, then code and docs are allowed.
+# Patient data, results, large files and credentials must never be committed.
+# Rename this file to .gitignore before use:  mv gitignore2 .gitignore
+# ---------------------------------------------------------------
+*
+!*/
+
+# code and documentation
+!*.R
+!*.Rmd
+!*.py
+!*.sh
+!*.md
+!LICENSE
+!.gitignore
+!*.Rproj
+!scripts/05_EQTm_analysis/visualization/coMET/comet_config*.txt
+
+# data and results (never pushed)
+data/
+**/results/
+**/permutation_hpc/data/
+**/scratch/
+
+# CIBERSORTx / UnBlender scripts contain a personal CIBERSORTx token and e-mail.
+# Remove the credentials before un-ignoring them.
+scripts/cell_proportions/cibersortx_unblender/
+
+# R / editor leftovers
+.Rhistory
+.RData
+.RDataTmp*
+.Rproj.user/
+*.swp

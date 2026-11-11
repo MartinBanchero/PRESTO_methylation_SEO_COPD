@@ -1,0 +1,184 @@
+---
+title: "01_Data_preparation"
+author: "Martin"
+date: "2024-03-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+The methylation data for this experiment was generated using Infinium MethylationEPIC v1 BeadChip (B5 manifest). The 118 samples were run across 15 slides (chips) with 8 arrays each.
+
+### Load packages
+```{r, message=FALSE, warning=FALSE}
+library("minfi")
+library("missMethyl") # Contains annot850K
+```
+
+### Read intensity data (IDAT)
+To import the raw methylation data we need:
+- Path to IDAT files.
+- Sample sheet (or target file) with the samples metadata, I use minfi **read.metharray.sheet()** to import phenotype data.
+- To import raw data, I used minfi function **read.metharray.exp()**.
+
+```{r}
+dataDirectory <- "../../data/array_raw_data/idats/"
+# list the files
+head(list.files(dataDirectory, recursive = TRUE))
+```
+### Create results dir for this markdown
+
+```{r}
+results.dir.prep <- file.path("../../results/00_data_wrangling/setObjects/")
+dir.create(results.dir.prep, recursive = TRUE)
+
+```
+
+### Read sample sheet with PRESTO metadata
+
+```{r message=FALSE}
+targets <- read.metharray.sheet(
+  dataDirectory,
+  pattern="MET2020-242-014_wPRESTO.csv",
+  recursive = T,
+  verbose = TRUE,
+)
+targets[1:5,]
+```
+# Remove columns with missing data
+
+```{r, include=FALSE}
+targets = apply(targets, 2, function(x) { x[ is.na(x) ] <- 'NULL'; x})
+targets = data.frame(targets)
+targets[1:5,]
+```
+
+### Annotation information
+The next step is to add annotations, this means we have to give a location to the CpG sites
+in the context of the genome. Also, is used to link the red and green raw data to M-U status.
+
+```{r}
+ann850k <- minfi::getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+ann850k[1:6,1:5]
+```
+
+### Data class structure
+#### Basic workflow
+IDAT files -->> RGChannelSet ---preprocessRaw-->> MethylSet
+
+#### Data class flow
+MethylSet-> |--mapToGenome -> GenomicMethylSet--ratioConvert->| GenomicRatioSet
+MethylSet-> |--ratioConvert-> RatioSet --mapToGenome-->GenomicRatioSet->| GenomicRatioSet 
+
+Using the function **read.metharray.exp()** the raw intensity data is stored in the 
+RGChannelSet object that contains the intensities from the green and red channels. 
+
+**Note:** The rgSet object contains the intensities from the control probes so far.
+
+# Get rgSet extended
+Needed to be extended for wm::beadcount()
+
+```{r message=FALSE, warning=FALSE}
+rgSet_ext <- read.metharray.exp(
+  targets=targets,
+  extended = TRUE 
+  )
+print(dim(rgSet_ext))
+```
+
+# Add main table to colData
+
+```{r}
+library(S4Vectors)
+main.table <- read_csv("../../results/00_data_wrangling/main_table.csv")
+
+rownames(main.table) <- sampleNames(rgSet_ext)
+df.main.table <- DataFrame(main.table)
+
+# Replace colData
+rgSet_ext@colData <- df.main.table
+
+rgSet_ext@colData[1:5,]
+```
+
+### Preprocess
+So, we have the data for all the PRESTO donors in an RGChannelSet object with the red and green intensities.
+To continue with the analysis we need to transform the intensities into met-unmet signals and store them into MethylSet object. To do this, we use the function *minfi::preprocessRaw()* that construct the unmeth-meth signals using the array design
+to match color channels and probes. Also,is important to note that the difference in the dimensions of both objects, rgSet and MSet differ. The MSet dim is smaller due to probes type 1, CpGs are measured by 2 probes. 
+
+The preprocessRaw() function does not apply ANY normalization and is useful for
+the initial QC.
+
+
+### Compare rgSet and MSet objects
+
+```{r}
+# Compare to previous object
+rgSet_ext
+```
+
+### RGChannelSet to MethylSet
+The preprocessRaw() function from Minfi package convert RGChannelSet to MethylSet, this is done by converting green and red channels into methylated and unmethylated matrices. 
+
+**Important: ** note that no normalization is perform.
+
+```{r}
+MSet <- minfi::preprocessRaw(rgSet_ext)
+MSet
+```
+
+
+### To access to unmeth and meth matrices 
+```{r}
+head(getMeth(MSet)[,1:3])
+```
+
+
+```{r}
+head(getUnmeth(MSet)[,1:3])
+```
+
+### RatioSet
+*"A RatioSet object is class designed to store Beta and/or M-values instead of the (un)methylated signals. An optional copy number matrix, CN, the sum of the methylated and unmethylated signals, can be also stored. Mapping a MethylSet to a RatioSet is irreversible, i.e. one cannot technically retrieve the methylated and unmethylated signals from a RatioSet. A RatioSet can be created with the function ratioConvert."*
+
+```{r}
+ratioSet <- ratioConvert(MSet, what = "both", keepCN = TRUE)
+# Observe the change of the assays
+ratioSet
+```
+
+### Map to genome
+*The function mapToGenome applied to a RatioSet object will add genomic coordinates to each probe together with some additional annotation information. The output object is a GenomicRatioSet*
+
+
+```{r}
+grSet <- mapToGenome(ratioSet)
+grSet
+```
+
+
+### Save SetObjects to use in QC
+
+```{r}
+# red-green channel set
+file.rgSet.ext <- file.path(results.dir.prep, "rgSet_ext.RData")
+save(rgSet_ext, file = file.rgSet.ext)
+print("rgSet saved!")
+
+# methyl set
+file.MSet <- file.path(results.dir.prep, "MSet.RData")
+save(MSet, file = file.MSet)
+print("MSet saved!")
+
+# genomic ratio set
+file.grSet <- file.path(results.dir.prep, "grSet.RData")
+save(grSet, file = file.grSet)
+print("grSet saved!")
+```
+
+### References
+- https://nbis-workshop-epigenomics.readthedocs.io/en/latest/content/tutorials/methylationArray/Array_Tutorial.html
+

@@ -1,0 +1,248 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-02-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# load packages
+```{r}
+library(tidyverse)
+library(ggraph)
+library(tidygraph)
+library(igraph)
+library(ggplot2)
+```
+# Load the data
+
+```{r}
+# metadata
+load("../../results/01_pre_process/04_normalization/SetObjects/ENmixMSet_norm.RData")
+
+df.sva <-read.csv(
+  "../../results/02_PCA_ctrl_probes/ENmix_sva_all_donors.csv",
+  row.names = 1
+)
+
+full.pheno.data <- as.data.frame(ENmixMSet.norm@colData) %>%
+                                      merge(df.sva, by = "row.names") %>%
+                                      column_to_rownames(var = "Row.names")
+
+head(full.pheno.data)
+```
+
+```{r}
+# Create hypo result dir
+hypo.result.dir <- file.path("../../results/05_EQTm/EQTm_results/hypo/network/") 
+dir.create(hypo.result.dir, recursive=TRUE)
+
+# load data
+hypo <- read.csv(
+  "../../results/05_EQTm/EQTm_results/hypo/hypomethylated_sig_gene_cpg_results.csv"
+)%>% dplyr::filter(adj.P.Val <= 0.05)
+
+write.csv(hypo, file.path(hypo.result.dir, "hypo_fdr_methylated_sig_gene_cpg_results.csv"), row.names = FALSE)
+
+# Create hyper result dir
+hyper.result.dir <- file.path("../../results/05_EQTm/EQTm_results/hyper/network/") 
+dir.create(hyper.result.dir, recursive=TRUE)
+
+#load data
+hyper <- read.csv(
+  "../../results/05_EQTm/EQTm_results/hyper/hypermethylated_sig_gene_cpg_results.csv"
+)%>% dplyr::filter(adj.P.Val <= 0.05)
+
+write.csv(hyper, file.path(hyper.result.dir, "hyper_fdr_methylated_sig_gene_cpg_results.csv"), row.names = FALSE)
+
+hyper
+```
+
+
+# Hypo-methylated CpGs and Regulated Genes
+
+```{r}
+df.meth.status.hypo <- hypo %>% # Re-structure code, for now I leave it as is
+                          select(CpG.id, geneID, gene.symbol, logFC, adj.P.Val) %>%
+                          mutate(logFC = as.numeric(logFC)) %>%
+                          filter(abs(logFC) > 0.5) %>%
+                          dplyr::filter(adj.P.Val <= 0.05) %>%
+                          arrange(desc(abs(logFC)))
+```
+
+```{r}
+df.meth.status.hyper <- hyper %>% # Re-structure code, for now I leave it as is
+                          select(CpG.id, geneID, gene.symbol, logFC, adj.P.Val) %>%
+                          mutate(logFC = as.numeric(logFC)) %>%
+                          filter(abs(logFC) > 0.5) %>%
+                          dplyr::filter(adj.P.Val <= 0.05) %>%
+                          arrange(desc(abs(logFC)))
+```
+
+```{r}
+# Load required libraries
+library(tidyverse)
+library(ggplot2)
+library(ggplot2)
+library(ggtree)
+library(aplot)
+library(dendextend)
+
+# Reshape data to fill missing combinations with 0
+df_wide <- df.meth.status.hyper %>%
+  pivot_wider(
+    id_cols = CpG.id,
+    names_from = gene.symbol,
+    values_from = logFC,
+    values_fill = 0
+  ) %>%
+  pivot_longer(
+    cols = -CpG.id,
+    names_to = "gene.symbol",
+    values_to = "logFC"
+  )
+
+# Create heatmap with ggplot2
+p <- ggplot(df_wide, aes(x = gene.symbol, y = CpG.id, fill = logFC)) +
+  geom_tile() +
+  scale_fill_gradient2(
+    low = "red",       # Color for lowest values
+    mid = "grey",    # Color for midpoint (0)
+    high = "blue",     # Color for highest values
+    midpoint = 0       # Explicitly set midpoint to 0
+  ) +
+  labs(
+    x = "CpG IDs",
+    y = "Gene IDs",
+    title = "LogFC Values by Gene and CpG ID (hyper-methylated)",
+    fill = "LogFC"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, size = 10),
+    panel.grid.major = element_line(color = "black", size = 0.5),  # Add major grid lines
+    panel.grid.minor = element_line(color = "black", size = 0.1)  # Add minor grid lines
+  )
+
+ggsave(
+  filename =  file.path(hyper.result.dir, "hyper_methylation_heatmap.png"),
+  p,
+  width = 15,
+  height = 10,
+  dpi = 300,
+  units = "in",
+  bg = "white", 
+  device = "png")
+```
+
+
+```{r}
+# Create nodes and edges data frames
+edges <- data.frame(
+  from = df.meth.status$CpG.id,  # CpG IDs
+  to = df.meth.status$gene.symbol, # Gene IDs
+  weight = df.meth.status$logFC         # Edge weights (e.g., correlation or significance)
+)
+
+id = c(unique(df.meth.status$CpG.id), df.meth.status$gene.symbol)
+type = ifelse(grepl("cg", id), "CpG", "Gene")
+
+nodes <- data.frame(
+  id = id,
+  type = type
+)
+nodes
+```
+
+
+```{r}
+# Create a graph object
+graph <- tbl_graph(nodes = nodes, edges = edges, directed = TRUE) %>%
+  activate(edges) %>%
+  mutate(abs_weight = abs(weight)) 
+
+# Plot the graph
+plot <- ggraph(graph, layout = "fr", weights = abs_weight) +  # Use absolute weights for layout
+  geom_edge_link(aes(width = abs(weight), color = weight > 0), alpha = 0.6) +  # Color by weight sign
+  geom_node_point(aes(color = type), size = 2) +  # Nodes colored by type
+  geom_node_text(aes(label = id), repel = TRUE, size = 3) +  # Node labels
+  scale_edge_width(range = c(0.5, 2)) +  # Adjust edge width range
+  scale_edge_color_manual(values = c("TRUE" = "blue", "FALSE" = "red")) +  # Set edge colors
+  theme_void() +  # Clean theme
+  theme(
+    plot.margin = margin(0.5, 0.5, 0.5, 0.5, "in"),  # Margin adjustments
+    legend.position = "none"  # Remove edge color legend
+  ) +
+  labs(title = "hypo-methylated CpGs and Regulated Genes")
+
+print(plot)
+
+# Save the plot to a file with high quality (300 dpi)
+ggsave(
+  filename =  file.path(hypo.result.dir, "hypo_methylation_plot_fc02.png"),
+  plot,
+  width = 10,
+  height = 8,
+  dpi = 300,
+  units = "in",
+  bg = "white", 
+  device = "png")
+
+```
+
+
+```{r}
+# Create nodes and edges data frames
+edges <- data.frame(
+  from = df.meth.status$CpG.id,  # CpG IDs
+  to = df.meth.status$gene.symbol, # Gene IDs
+  weight = df.meth.status$logFC         # Edge weights (e.g., correlation or significance)
+)
+
+id = c(unique(df.meth.status$CpG.id), df.meth.status$gene.symbol)
+type = ifelse(grepl("cg", id), "CpG", "Gene")
+
+nodes <- data.frame(
+  id = id,
+  type = type
+)
+nodes
+```
+
+
+```{r}
+# Create a graph object
+graph <- tbl_graph(nodes = nodes, edges = edges, directed = TRUE) %>%
+  activate(edges) %>%
+  mutate(abs_weight = abs(weight)) 
+
+# Plot the graph
+plot <- ggraph(graph, layout = "fr", weights = abs_weight) +  # Use absolute weights for layout
+  geom_edge_link(aes(width = abs(weight), color = weight > 0), alpha = 0.6) +  # Color by weight sign
+  geom_node_point(aes(color = type), size = 2) +  # Nodes colored by type
+  geom_node_text(aes(label = id), repel = TRUE, size = 3) +  # Node labels
+  scale_edge_width(range = c(0.5, 2)) +  # Adjust edge width range
+  scale_edge_color_manual(values = c("TRUE" = "blue", "FALSE" = "red")) +  # Set edge colors
+  theme_void() +  # Clean theme
+  theme(
+    plot.margin = margin(0.5, 0.5, 0.5, 0.5, "in"),  # Margin adjustments
+    legend.position = "none"  # Remove edge color legend
+  ) +
+  labs(title = "hypo-methylated CpGs and Regulated Genes")
+
+print(plot)
+
+# Save the plot to a file with high quality (300 dpi)
+ggsave(
+  filename =  file.path(hypo.result.dir, "hypo_methylation_plot_fc02.png"),
+  plot,
+  width = 10,
+  height = 8,
+  dpi = 300,
+  units = "in",
+  bg = "white", 
+  device = "png")
+
+```

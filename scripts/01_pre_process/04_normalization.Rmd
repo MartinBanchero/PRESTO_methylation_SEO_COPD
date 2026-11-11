@@ -1,0 +1,227 @@
+---
+title: "04_normalization"
+author: "Martin"
+date: "2024-03-13"
+output: html_document
+---
+
+## Introduction
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, dev = "CairoPNG")
+```
+
+```{r message=FALSE, warning=FALSE}
+library(minfi)
+library(tidyverse)
+library("missMethyl") # Contains annot850K
+library("ENmix")
+```
+
+## Load objects with filtered samples
+
+```{r}
+load("../../results/01_pre_process/02_sample_QC/SetObjects/sf_rgSet_ext.RData")
+load("../../results/01_pre_process/03_probes_QC/SetObjects/rp_sf_MSet.RData")
+```
+
+
+```{r}
+plotBetasByType(rp.sf.MSet[,1], main="Raw")
+```
+
+## Check dimensions
+```{r}
+dim(rp.sf.MSet)
+dim(sf.rgSet_ext)
+```
+### Subset to the samples I want to use with limma
+## ENmix 
+Reported to work good including batch effect correction.
+https://genomebiology.biomedcentral.com/articles/10.1186/s13059-022-02793-w
+
+```{r}
+df.failed.probes = read.csv(
+  "../../results/01_pre_process/03_probes_QC/failed_probes/failed_probes.txt",
+  header = FALSE
+  )
+failed.probes <- df.failed.probes$V1
+print(length(failed.probes))
+```
+
+## MSet vs ENmix MSet
+Now, I want to run preprocessENmix() using failed probes, the output should have similar dim as MSet manually filtered.
+
+```{r}
+print(dim(rp.sf.MSet))
+```
+
+```{r}
+minfi::densityPlot(rp.sf.MSet)
+```
+
+```{r}
+dim(sf.rgSet_ext)
+
+ENmixMSet <-preprocessENmix(
+  sf.rgSet_ext,# filtered out sample before
+  bgParaEst = "oob",# background estimation
+  dyeCorr = "RELIC",# dye bias correction
+  nCores = 12,
+  exCpG = failed.probes # add the failed probes to be excluded
+)
+print(dim(ENmixMSet))
+
+save(
+  ENmixMSet, 
+  file = "../../results/01_pre_process/04_normalization/SetObjects/ENmixMSet.RData"
+  )
+
+```
+
+
+# Approach 2: I can use BMIQ instead of the quantile, better normalization.
+
+```{r eval=FALSE}
+library(wateRmelon)
+wtR.BMIQ.betas <- wateRmelon::BMIQ(ENmixMSet)
+
+# Save
+save(
+  wtR.BMIQ.betas, 
+  file = "../../results/01_pre_process/04_normalization/SetObjects/wtR_betas_norm_BMIQ.RData"
+  )
+dim(wtR.BMIQ.betas)
+```
+# At the end I didnt use this, I apply windsorization for extreme values
+
+```{r eval=FALSE}
+BMIQ.betas.norm.ftr = qcfilter(
+  wtR.BMIQ.betas,
+  rmoutlier = TRUE, 
+  rmcr = TRUE, # remove col and row with too many missing values (default 5%)
+  rthre = 0.05, #5% rows
+  cthre = 0.05, #5% columns
+  impute = FALSE
+) #filter out low quality and outlier values, remove rows and cols
+
+dim(BMIQ.betas.norm.ftr)
+```
+
+```{r}
+norm.m.values = B2M(BMIQ.betas.norm.ftr)
+boxplot(norm.m.values, main = "M-value distribution across samples")
+```
+# ENmix
+
+```{r}
+save(
+  BMIQ.betas.norm.ftr, 
+  file = "../../results/01_pre_process/04_normalization/SetObjects/wtR_BMIQ_betas_norm_ftr.RData"
+  )
+dim(BMIQ.betas.norm.ftr)
+```
+
+
+
+```{r}
+betas <- BMIQ.betas.norm.ftr
+
+ENmixMSet <- ENmixMSet[featureNames(ENmixMSet) %in% rownames(betas), ]
+
+typeI <- getProbeInfo(ENmixMSet, type = "I")[, c("Name","nCpG")]
+typeII <- getProbeInfo(ENmixMSet, type = "II")[, c("Name","nCpG")]
+
+plot(
+  density(
+    rowMeans(
+      betas[rownames(betas) %in% typeII$Name, ]),
+      na.rm=T
+      ),
+    weights=rep(1/nrow(betas), sum(typeII$nCpG)),
+     col="black",
+  xlab="Beta",
+  lwd=2,
+  lty=2,
+  main="Beta-value by type")
+
+lines(
+  density(
+    rowMeans(
+      betas[rownames(betas) %in% typeI$Name, ],      na.rm=T
+      ),
+    weights = rep(1 / sum(rownames(betas) %in% typeI$Name), 
+                  sum(rownames(betas) %in% typeI$Name))
+    ),
+  col="black", lwd=2, lty=1)
+
+```
+
+## Approach 1 (I didnt use it in the final version): Normalize inter-array normalization
+```{r eval=FALSE}
+start.time <- Sys.time()
+ENmixMSet.norm <- norm.quantile(ENmixMSet, method="quantile1")# Normalization
+elapsed.time <- Sys.time() - start.time
+print(elapsed.time)
+
+save(
+  ENmixMSet.norm,
+  file = "../../results/01_pre_process/04_normalization/SetObjects/ENmixMSet_norm.RData"
+)
+densityPlot(ENmixMSet.norm)
+```
+
+```{r}
+ENmix.beta.norm.rcp <- rcp(ENmixMSet.norm) # Regression on correlated probes
+save(
+  ENmix.beta.norm.rcp, 
+  file = "../../results/01_pre_process/04_normalization/SetObjects/ENmix_beta_norm_rcp.RData"
+  )
+print(dim(ENmix.beta.norm.rcp))
+```
+
+## Convert the qcd and filtered MSet to grSet
+```{r}
+ratioSet <- ratioConvert(ENmixMSet.norm, what = "both", keepCN = TRUE)
+grSet <- mapToGenome(ratioSet)
+
+norm.grSet <- updateObject(grSet, beta=ENmix_betas.norm.ftr)
+dim(norm.grSet)
+
+# ENmix
+save(
+  norm.grSet, 
+  file = "../../results/01_pre_process/04_normalization/SetObjects/ENmix_norm_ftr_grSet.RData"
+  )
+```
+
+# Apply ENmix filtering 
+For now I dont use this function, it is removing outlier by using Tukey's fences and imputing outliers by using knn. 
+
+```{r eval=FALSE}
+ENmix_betas.norm.ftr = qcfilter(
+  ENmix.beta.norm.rcp,
+  rmoutlier = TRUE, 
+  byrow = TRUE,
+  rmcr = TRUE, # remove col and row with too many missing values (default 5%)
+  rthre = 0.05, #5% rows
+  cthre = 0.05, #5% columns
+  impute=TRUE # knn to impute
+) #filter out low quality and outlier values, remove rows and cols
+
+dim(ENmix_betas.norm.ftr)
+
+# ENmix
+save(
+  ENmix_betas.norm.ftr, 
+  file = "../../results/01_pre_process/04_normalization/SetObjects/ENmix_betas_norm_ftr.RData"
+  )
+dim(ENmix_betas.norm.ftr)
+```
+
+
+### References
+- Paper Funnorm: https://genomebiology.biomedcentral.com/articles/10.1186/s13059-014-0503-2
+- Paper Normalization benchmark: https://clinicalepigeneticsjournal.biomedcentral.com/articles/10.1186/s13148-023-01459-z
+- Enmix norm: https://bmcresnotes.biomedcentral.com/articles/10.1186/s13104-021-05741-2
+
